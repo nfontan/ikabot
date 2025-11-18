@@ -14,8 +14,31 @@ from ikabot.helpers.process import set_child_mode
 from ikabot.helpers.botComm import sendToBot
 
 
+def _select_origin_city(session, originCityId, islandId):
+    """
+    Cambia la ciudad actual en el servidor usando la acción oficial
+    header / changeCurrentCity (igual que el dropdown de ciudades).
+    """
+    try:
+        params = {
+            "action": "header",
+            "function": "changeCurrentCity",
+            "oldView": "island",
+            "cityId": originCityId,
+            "islandId": islandId,
+            "backgroundView": "island",
+            "currentIslandId": islandId,
+            "actionRequest": actionRequest,
+            "ajax": 1,
+        }
+        session.post(params=params, noIndex=True)
+    except Exception as e:
+        print(f"[WARN] No se pudo cambiar la ciudad activa a {originCityId}: {e}")
+
+
 def _send_plunder(
     session,
+    originCityId,
     islandId,
     destinationCityId,
     transporter,
@@ -25,22 +48,27 @@ def _send_plunder(
 ):
     """
     Hace UNA llamada a sendArmyPlunderSea.
+
     Orden de unidades:
       315 -> lanceros
       303 -> hoplitas
       305 -> morteros
-    Usa el actionRequest global de ikabot.config.
     """
 
     params = {
         "action": "transportOperations",
         "function": "sendArmyPlunderSea",
 
+        # ORIGEN (aunque Ikariam usa la ciudad activa, no molesta incluirlos)
+        "cityId": originCityId,
+        "currentCityId": originCityId,
+
+        # DESTINO
         "islandId": islandId,
         "destinationCityId": destinationCityId,
 
         # Lanceros (315)
-        "cargo_army_315_upkeep": 0,   # podés ajustar el upkeep real si querés
+        "cargo_army_315_upkeep": 0,   # ajustar si querés el upkeep real
         "cargo_army_315": lancers_315,
 
         # Hoplitas (303)
@@ -51,7 +79,7 @@ def _send_plunder(
         "cargo_army_305_upkeep": 30,
         "cargo_army_305": morteros_305,
 
-        # Otro slot que venía en tu curl, lo dejamos en 0
+        # Slot extra que venía en el curl original, lo dejamos en 0
         "cargo_army_309_upkeep": 45,
         "cargo_army_309": 0,
 
@@ -78,7 +106,7 @@ def _send_plunder(
 def _maybe_activate_poseidon(session):
     """
     Intenta activar el milagro de Poseidón usando el módulo oficial de ikabot.
-    Si no existe o cambia la firma, simplemente loguea y sigue.
+    Si no existe o falla, solo loguea y sigue.
     """
     try:
         from ikabot.function.activateMiracle import activateMiracle
@@ -96,13 +124,11 @@ def _maybe_activate_poseidon(session):
 
 def _mostrar_errores_provide_feedback(raw_response):
     """
-    Recibe el texto devuelto por session.post (JSON Ikariam),
-    busca la sección ['provideFeedback', [...]] y muestra solo los textos de error.
+    Busca la sección ['provideFeedback', [...]] y muestra solo los textos.
     """
     try:
         data = json.loads(raw_response, strict=False)
     except Exception:
-        # Si no podemos parsear, no spameamos; mostramos solo un recorte chico
         try:
             txt = raw_response.decode("utf-8", errors="ignore")
         except Exception:
@@ -136,17 +162,27 @@ def _mostrar_errores_provide_feedback(raw_response):
 
 def sendArmyPlunderLoop(session, event, stdin_fd, predetermined_input):
     """
-    Igual estilo que autoPirate / constructBuilding:
+    Fase interactiva (al inicio del proceso hijo):
 
-      - Fase interactiva (en el proceso hijo al principio):
-          * redirige stdin
-          * usa banner(), read(), chooseCity(), enter()
-          * al final llama set_child_mode(session) y event.set()
+      - Pide:
+          * ciudad de origen
+          * islandId destino
+          * cityId destino
+          * barcos
+          * lanceros (315), hoplitas (303), morteros (305)
+          * Poseidón sí/no
+          * repeticiones e intervalo (minutos)
+      - Muestra resumen
+      - Llama a set_child_mode(session) y event.set()
 
-      - Fase background:
-          * hace los saqueos en loop
-          * NO usa event como kill switch (igual que autoPirate)
-          * usa session.setStatus() para ver estado en el menú
+    Fase background:
+
+      - En cada iteración:
+          1) (opcional) activa Poseidón
+          2) fuerza cambio de ciudad a la ciudad de origen (changeCurrentCity)
+          3) llama a sendArmyPlunderSea con los mismos parámetros
+          4) muestra solo provideFeedback
+          5) duerme X minutos y repite
     """
 
     # Fase interactiva
@@ -216,7 +252,7 @@ def sendArmyPlunderLoop(session, event, stdin_fd, predetermined_input):
 
     # ---------- Modo hijo / segundo plano ----------
     set_child_mode(session)
-    event.set()  # handshake con el padre, igual que autoPirate
+    event.set()  # handshake con el padre
 
     try:
         current_run = 0
@@ -233,13 +269,18 @@ def sendArmyPlunderLoop(session, event, stdin_fd, predetermined_input):
             print(f"\n=== Envío {current_run} ===")
             print(status_text)
 
+            # 1) (Opcional) activar Poseidón
             if use_poseidon:
                 _maybe_activate_poseidon(session)
 
-            # Hacemos el saqueo
+            # 2) Re-seleccionar la ciudad de origen en Ikariam
+            _select_origin_city(session, originCityId, islandId)
+
+            # 3) Hacer el saqueo desde esa ciudad
             try:
                 resp = _send_plunder(
                     session=session,
+                    originCityId=originCityId,
                     islandId=islandId,
                     destinationCityId=destinationCityId,
                     transporter=transporter,
@@ -259,15 +300,14 @@ def sendArmyPlunderLoop(session, event, stdin_fd, predetermined_input):
                     pass
                 break
 
-            # Mostrar solo errores relevantes (provideFeedback)
+            # 4) Mostrar solo errores / mensajes relevantes (provideFeedback)
             _mostrar_errores_provide_feedback(resp)
 
-            # Si todavía quedan envíos, esperamos
+            # 5) Esperar para el próximo envío
             if repetitions > 0 and interval_seconds > 0:
                 print(
                     f"[INFO] Esperando {interval_minutes} minuto(s) antes del próximo envío..."
                 )
-                # Igual que autoPirate: no miramos event.is_set() aquí
                 time.sleep(interval_seconds)
 
         session.setStatus("Saqueos automáticos finalizados")
