@@ -9,7 +9,7 @@ import traceback
 
 from ikabot.config import *  # incluye config, actionRequest, etc.
 from ikabot.helpers.gui import *
-from ikabot.helpers.pedirInfo import *
+from ikabot.helpers.pedirInfo import *  # read, chooseCity, etc.
 from ikabot.helpers.process import set_child_mode
 from ikabot.helpers.botComm import sendToBot
 
@@ -19,12 +19,16 @@ def _send_plunder(
     islandId,
     destinationCityId,
     transporter,
-    frontline_units,
-    mortars,
-    lancers,
+    lancers_315,
+    hoplitas_303,
+    morteros_305,
 ):
     """
-    Hace UNA llamada a sendArmyPlunderSea (equivalente al curl original).
+    Hace UNA llamada a sendArmyPlunderSea.
+    Orden de unidades:
+      315 -> lanceros
+      303 -> hoplitas
+      305 -> morteros
     Usa el actionRequest global de ikabot.config.
     """
 
@@ -35,17 +39,17 @@ def _send_plunder(
         "islandId": islandId,
         "destinationCityId": destinationCityId,
 
-        # Unidades de primera línea (303)
+        # Lanceros (315)
+        "cargo_army_315_upkeep": 0,   # podés ajustar el upkeep real si querés
+        "cargo_army_315": lancers_315,
+
+        # Hoplitas (303)
         "cargo_army_303_upkeep": 3,
-        "cargo_army_303": frontline_units,
+        "cargo_army_303": hoplitas_303,
 
         # Morteros (305)
         "cargo_army_305_upkeep": 30,
-        "cargo_army_305": mortars,
-
-        # Lanceros (315) – upkeep aproximado 0, si hace falta luego se ajusta
-        "cargo_army_315_upkeep": 0,
-        "cargo_army_315": lancers,
+        "cargo_army_305": morteros_305,
 
         # Otro slot que venía en tu curl, lo dejamos en 0
         "cargo_army_309_upkeep": 45,
@@ -63,16 +67,11 @@ def _send_plunder(
         "templateView": "plunder",
         "ajax": 1,
 
-        # Token CSRF de ikabot (global)
+        # Token CSRF global
         "actionRequest": actionRequest,
     }
 
-    # DEBUG opcional, si querés ver lo que se manda:
-    # print("[DEBUG] Params a enviar:")
-    # for k, v in params.items():
-    #     print("   ", k, "=", repr(v))
-
-    resp = session.post(params=params)
+    resp = session.post(params=params, noIndex=True)
     return resp
 
 
@@ -95,21 +94,62 @@ def _maybe_activate_poseidon(session):
         print(f"[WARN] Error al activar Poseidón: {e}")
 
 
+def _mostrar_errores_provide_feedback(raw_response):
+    """
+    Recibe el texto devuelto por session.post (JSON Ikariam),
+    busca la sección ['provideFeedback', [...]] y muestra solo los textos de error.
+    """
+    try:
+        data = json.loads(raw_response, strict=False)
+    except Exception:
+        # Si no podemos parsear, no spameamos; mostramos solo un recorte chico
+        try:
+            txt = raw_response.decode("utf-8", errors="ignore")
+        except Exception:
+            txt = str(raw_response)
+        print("[DEBUG] Respuesta no es JSON. (primeros 300 chars):")
+        print(txt[:300])
+        return
+
+    errores = []
+    for bloque in data:
+        if not isinstance(bloque, list) or len(bloque) < 2:
+            continue
+        clave, contenido = bloque[0], bloque[1]
+        if clave == "provideFeedback" and isinstance(contenido, list):
+            for item in contenido:
+                if not isinstance(item, dict):
+                    continue
+                texto = item.get("text")
+                loc = item.get("location")
+                if texto:
+                    if loc is not None:
+                        errores.append(f"[{loc}] {texto}")
+                    else:
+                        errores.append(texto)
+
+    if errores:
+        print("[INFO] Mensajes del servidor:")
+        for e in errores:
+            print("  -", e)
+
+
 def sendArmyPlunderLoop(session, event, stdin_fd, predetermined_input):
     """
-    Igual estilo que autoPirate:
+    Igual estilo que autoPirate / constructBuilding:
 
-      - Fase 1 (interactiva):
+      - Fase interactiva (en el proceso hijo al principio):
           * redirige stdin
-          * usa read()/enter() para pedir parámetros
+          * usa banner(), read(), chooseCity(), enter()
           * al final llama set_child_mode(session) y event.set()
 
-      - Fase 2 (background):
-          * while envíos > 0: hace saqueos, espera X minutos, respeta event
-          * usa session.setStatus() para que se vea el estado en el menú
+      - Fase background:
+          * hace los saqueos en loop
+          * NO usa event como kill switch (igual que autoPirate)
+          * usa session.setStatus() para ver estado en el menú
     """
 
-    # --- Redirigir stdin y predetermined_input, igual que autoPirate ---
+    # Fase interactiva
     sys.stdin = os.fdopen(stdin_fd)
     config.predetermined_input = predetermined_input
 
@@ -117,8 +157,15 @@ def sendArmyPlunderLoop(session, event, stdin_fd, predetermined_input):
     try:
         print("=== Saqueos automáticos por mar (sendArmyPlunderSea) ===\n")
 
-        # Pedimos parámetros usando read(), igual que autoPirate
-        print("Ingrese el ID de la isla (islandId):")
+        # ---------- Ciudad de ORIGEN ----------
+        print("Ciudad de ORIGEN (desde donde salen las tropas):")
+        originCity = chooseCity(session)
+        originCityId = originCity["id"]
+        originCityName = originCity["name"]
+        banner()
+
+        # ---------- Parámetros de destino y tropas ----------
+        print("Ingrese el ID de la isla destino (islandId):")
         islandId = read(min=1, digit=True)
 
         print("Ingrese el ID de la ciudad destino (destinationCityId):")
@@ -127,14 +174,15 @@ def sendArmyPlunderLoop(session, event, stdin_fd, predetermined_input):
         print("Barcos mercantes a enviar (transporter):")
         transporter = read(min=1, digit=True)
 
-        print("Unidades de primera línea a enviar (cargo_army_303):")
-        frontline_units = read(min=0, digit=True)
+        # Orden pedido: 315 (lanceros), 303 (hoplitas), 305 (morteros)
+        print("Lanceros a enviar (cargo_army_315):")
+        lancers_315 = read(min=0, digit=True)
+
+        print("Hoplitas a enviar (cargo_army_303):")
+        hoplitas_303 = read(min=0, digit=True)
 
         print("Morteros a enviar (cargo_army_305):")
-        mortars = read(min=0, digit=True)
-
-        print("Lanceros a enviar (cargo_army_315):")
-        lancers = read(min=0, digit=True)
+        morteros_305 = read(min=0, digit=True)
 
         print("¿Activar milagro Poseidón antes de cada envío? (Y|N)")
         poseidonAnswer = read(values=["y", "Y", "n", "N"])
@@ -148,27 +196,27 @@ def sendArmyPlunderLoop(session, event, stdin_fd, predetermined_input):
         interval_seconds = interval_minutes * 60
 
         print("\n=== RESUMEN CONFIGURACIÓN ===")
-        print(f"islandId          = {islandId}")
-        print(f"destinationCityId = {destinationCityId}")
+        print(f"Ciudad origen     = {originCityName} (id={originCityId})")
+        print(f"islandId destino  = {islandId}")
+        print(f"cityId destino    = {destinationCityId}")
         print(f"Mercantes         = {transporter}")
-        print(f"1ª línea (303)    = {frontline_units}")
-        print(f"Morteros (305)    = {mortars}")
-        print(f"Lanceros (315)    = {lancers}")
+        print(f"Lanceros (315)    = {lancers_315}")
+        print(f"Hoplitas (303)    = {hoplitas_303}")
+        print(f"Morteros (305)    = {morteros_305}")
         print(f"Aldea bárbara     = 0")
         print(f"Repeticiones      = {repetitions}")
         print(f"Intervalo (min)   = {interval_minutes}")
         print(f"Poseidón          = {'Sí' if use_poseidon else 'No'}")
 
-        enter()  # “Press enter to continue”, igual que en otras funciones
+        enter()  # “Press enter to continue”
 
     except KeyboardInterrupt:
-        # Si el usuario corta con Ctrl+C en la fase interactiva
         event.set()
         return
 
-    # --- A partir de acá, modo hijo (segundo plano), igual que autoPirate ---
+    # ---------- Modo hijo / segundo plano ----------
     set_child_mode(session)
-    event.set()  # avisar al padre que ya terminamos la parte interactiva
+    event.set()  # handshake con el padre, igual que autoPirate
 
     try:
         current_run = 0
@@ -177,7 +225,10 @@ def sendArmyPlunderLoop(session, event, stdin_fd, predetermined_input):
             current_run += 1
             repetitions -= 1
 
-            status_text = f"Saqueo automático {current_run} restante(s): {repetitions}"
+            status_text = (
+                f"Saqueo automático {current_run} (restantes: {repetitions}) "
+                f"desde {originCityName} hacia ciudad {destinationCityId}"
+            )
             session.setStatus(status_text)
             print(f"\n=== Envío {current_run} ===")
             print(status_text)
@@ -192,9 +243,9 @@ def sendArmyPlunderLoop(session, event, stdin_fd, predetermined_input):
                     islandId=islandId,
                     destinationCityId=destinationCityId,
                     transporter=transporter,
-                    frontline_units=frontline_units,
-                    mortars=mortars,
-                    lancers=lancers,
+                    lancers_315=lancers_315,
+                    hoplitas_303=hoplitas_303,
+                    morteros_305=morteros_305,
                 )
             except Exception:
                 info = "Error al hacer la request de saqueo"
@@ -208,32 +259,16 @@ def sendArmyPlunderLoop(session, event, stdin_fd, predetermined_input):
                     pass
                 break
 
-            # Mostrar algo de la respuesta para debug
-            try:
-                data = json.loads(resp)
-                print("[DEBUG] Respuesta JSON:")
-                print(data)
-            except Exception:
-                try:
-                    txt = resp.decode("utf-8", errors="ignore")
-                except Exception:
-                    txt = str(resp)
-                print("[DEBUG] Respuesta cruda del servidor (primeros 500 chars):")
-                print(txt[:500])
+            # Mostrar solo errores relevantes (provideFeedback)
+            _mostrar_errores_provide_feedback(resp)
 
             # Si todavía quedan envíos, esperamos
             if repetitions > 0 and interval_seconds > 0:
                 print(
                     f"[INFO] Esperando {interval_minutes} minuto(s) antes del próximo envío..."
                 )
-                remaining = int(interval_seconds)
-                # Espera troceada para poder cortar con event
-                while remaining > 0:
-                    if event.is_set():
-                        print("[INFO] Tarea de saqueo cancelada (event set).")
-                        return
-                    time.sleep(1)
-                    remaining -= 1
+                # Igual que autoPirate: no miramos event.is_set() aquí
+                time.sleep(interval_seconds)
 
         session.setStatus("Saqueos automáticos finalizados")
         print("\n=== Saqueos automáticos finalizados ===")
