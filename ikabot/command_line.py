@@ -49,6 +49,8 @@ from ikabot.helpers.pedirInfo import read
 from ikabot.helpers.process import updateProcessList
 from ikabot.web.session import *
 from ikabot.function.modifyProduction import modifyProduction
+from ikabot.function.sendArmyPlunderLoop import sendArmyPlunderLoop
+
 
 
 def menu(session, checkUpdate=True):
@@ -148,7 +150,8 @@ def menu(session, checkUpdate=True):
         2107: importExportCookie,
         2108: loadCustomModule,
         22: consolidateResources,
-        23: modifyProduction
+        23: modifyProduction,
+        24: sendArmyPlunderLoop
     }
 
     print("(0)  Exit")
@@ -175,6 +178,7 @@ def menu(session, checkUpdate=True):
     print("(21) Options / Settings")
     print("(22) Consolidate resources")
     print("(23) Set Production of Saw mill / Luxury good")
+    print("(24) Saqueos Automaticos")
 
     total_options = len(menu_actions) + 1
     selected = read(min=0, max=total_options, digit=True, empty=True)
