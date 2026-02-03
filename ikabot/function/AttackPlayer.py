@@ -299,6 +299,10 @@ def AttackPlayer(session, event, stdin_fd, predetermined_input):
         if not read_yes_no("\nProceed with this attack plan?"):
             print("Attack aborted.")
             return
+        send_notifications = read_yes_no(
+            "\nDo you want to receive Telegram notifications for this attack?"
+        )
+
 
     except KeyboardInterrupt:
         return
@@ -366,7 +370,8 @@ def AttackPlayer(session, event, stdin_fd, predetermined_input):
                         f"(state={state_city})."
                     )
                     try:
-                        sendToBot(session, msg_stop)
+                        if send_notifications:
+                            sendToBot(session, msg_stop)
                     except Exception:
                         pass
                     attack_log(msg_stop, level="WARN")
@@ -400,18 +405,19 @@ def AttackPlayer(session, event, stdin_fd, predetermined_input):
                 status_text = "Success" if success else f"Failed ({server_msg})"
                 delay_info = f"{last_delay} seconds" if wave_number > 1 else "N/A"
                 session.setStatus(f"Attack wave {wave_number} of {number_of_waves}")
-                sendToBot(
-                    session,
-                    (
-                        f"Attack wave {wave_number} of {number_of_waves}\n"
-                        f"Origin city: {decodeUnicodeEscape(origin_city['name'])}\n"
-                        f"Target city: {decodeUnicodeEscape(target_city['name'])}\n"
-                        f"Units sent: {sum(selected_units_payload.values())}\n"
-                        f"Ships used: {ATTACK_SHIPS}\n"
-                        f"Wave status: {status_text}\n"
-                        f"Delay before this wave: {delay_info}"
+                if send_notifications:
+                    sendToBot(
+                        session,
+                        (
+                            f"Attack wave {wave_number} of {number_of_waves}\n"
+                            f"Origin city: {decodeUnicodeEscape(origin_city['name'])}\n"
+                            f"Target city: {decodeUnicodeEscape(target_city['name'])}\n"
+                            f"Units sent: {sum(selected_units_payload.values())}\n"
+                            f"Ships used: {ATTACK_SHIPS}\n"
+                            f"Wave status: {status_text}\n"
+                            f"Delay before this wave: {delay_info}"
+                        )
                     )
-                )
             except Exception:
                 pass
 
