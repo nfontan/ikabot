@@ -399,6 +399,7 @@ def AttackPlayer(session, event, stdin_fd, predetermined_input):
             try:
                 status_text = "Success" if success else f"Failed ({server_msg})"
                 delay_info = f"{last_delay} seconds" if wave_number > 1 else "N/A"
+                session.setStatus(f"Attack wave {wave_number} of {number_of_waves}")
                 sendToBot(
                     session,
                     (
