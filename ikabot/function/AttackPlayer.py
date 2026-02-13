@@ -23,13 +23,6 @@ from ikabot.helpers.varios import decodeUnicodeEscape, addThousandSeparator, wai
 
 getcontext().prec = 30
 
-# =========================
-# CONFIG: ??? ??? ????? ??????
-# ???? ????? ???? ??? ?????? ???? ???????? ?? ?? Wave
-# =========================
-ATTACK_SHIPS = 303  # ????: 50 ????? ??? ??? ????
-
-
 # Constants
 TRANSPORT_SHIP_CAPACITY = 600
 UNIT_UPKEEP = {
@@ -78,30 +71,71 @@ def _force_origin_city_context(session, origin_city_id):
 def get_units(session, city):
     _force_origin_city_context(session, city["id"])
 
-    params = {
-        "view": "cityMilitary", "activeTab": "tabUnits", "cityId": city["id"],
-        "backgroundView": "city", "currentCityId": city["id"], "templateView": "cityMilitary",
-        "actionRequest": actionRequest, "ajax": "1",
-    }
+    params = {"view": "cityMilitary", "cityId": city["id"], "ajax": "1"}
+    
     try:
         resp_text = session.post(params=params)
         resp = json.loads(resp_text, strict=False)
-        html = resp[1][1][1]
-        html = html.split('<div class="fleet')[0]
-        unit_id_names = re.findall(r'<div class="army (s\d+)">\s*<div class="tooltip">(.*?)<\/div>', html)
-        unit_amounts = re.findall(r"<td>(.*?)\s*</td>", html)
+        
+        server_rel = "ownCity"
+        for update in resp:
+            if update[0] == "updateGlobalData":
+                server_rel = update[1].get('headerData', {}).get('relatedCity', {}).get('cssClass', 'ownCity')
+                break
+
+        is_special_view = server_rel in ['occupiedCities', 'deployedCities']
+        html = ""
+        
+        if is_special_view:
+            params["view"] = "relatedCities"
+            resp_text = session.post(params=params)
+            resp = json.loads(resp_text, strict=False)
+
+        for update in resp:
+            if update[0] == "changeView":
+                html = update[1][1]
+                break
+
+        if not html:
+            return {}
 
         units = {}
-        for i in range(len(unit_id_names)):
-            amount = int(unit_amounts[i].replace(",", "").replace("-", "0"))
-            if amount > 0:
-                unit_id = unit_id_names[i][0].replace('s', '')
-                unit_name = unit_id_names[i][1]
-                units[unit_id] = {"name": decodeUnicodeEscape(unit_name), "amount": amount}
+        if is_special_view:
+            # --- allies/garrison ---
+            # En relatedCities, tus tropas están en el primer 'contentBox01h'.
+            # Al dividir por esta clase, el índice [1] es tu sección, y el [2] es la guarnición ajena.
+            # Usamos [1] para aislarnos de los aliados/ocupados sin importar el idioma.
+            parts = html.split('class="contentBox01h"')
+            if len(parts) > 1:
+                html = parts[1] 
+            
+            mapping = {
+                'phalanx': '303', 'steamgiant': '308', 'spearman': '315',
+                'swordsman': '302', 'slinger': '301', 'archer': '313',
+                'marksman': '304', 'ram': '307', 'catapult': '306',
+                'mortar': '305', 'gyrocopter': '312', 'bombardier': '309',
+                'cook': '310', 'medic': '311', 'spartan': '319'
+            }
+            found = re.findall(r'class="armybutton (\w+)">\s*(\d+)\s*</div>', html)
+            for u_class, u_amount in found:
+                u_id = mapping.get(u_class)
+                if u_id:
+                    units[u_id] = {"name": u_class.capitalize(), "amount": int(u_amount)}
+        else:
+            # Own Cities
+            html_units = html.split('<div class="fleet')[0]
+            unit_id_names = re.findall(r'<div class="army (s\d+)">\s*<div class="tooltip">(.*?)<\/div>', html_units)
+            unit_amounts = re.findall(r"<td>\s*([\d,.-]+)\s*<\/td>", html_units)
+            for i in range(min(len(unit_id_names), len(unit_amounts))):
+                amount = int(unit_amounts[i].replace(",", "").replace("-", "0").strip())
+                if amount > 0:
+                    u_id = unit_id_names[i][0].replace('s', '')
+                    units[u_id] = {"name": decodeUnicodeEscape(unit_id_names[i][1]), "amount": amount}
+        
         return units
-    except Exception:
+    except Exception as e:
+        print(f"[DEBUG] Error en get_units: {str(e)}")
         return {}
-
 
 def choose_target_island_and_city(session):
     """
@@ -250,8 +284,8 @@ def AttackPlayer(session, event, stdin_fd, predetermined_input):
             return
 
         banner()
-        print("?? ?? ????? ???? ?? ??????")
-        origin_city = chooseCity(session)
+        print("Choose origin city")
+        origin_city = chooseCity(session,foreign=True)
         if not origin_city:
             return
 
@@ -288,8 +322,18 @@ def AttackPlayer(session, event, stdin_fd, predetermined_input):
         for unit_id, qty in selected_units_payload.items():
             unit_name = units_in_origin.get(unit_id, {}).get('name', unit_id)
             print(f"    - {unit_name}: {addThousandSeparator(qty)}")
+        # Obtenemos el total disponible para mostrarlo en la pregunta
+        try:
+            available_ships = int(getAvailableShips(session))
+        except Exception:
+            available_ships = 0
 
-        print(f"\nTransport ships to use per wave: {ATTACK_SHIPS}")
+        # Reasignamos la variable preguntando al usuario
+        ATTACK_SHIPS = int(read(
+            msg=f"\nHow many transport ships to use per wave? (available: {available_ships}): ",
+            min=0, max=available_ships, default=available_ships
+        ))
+        #print(f"\nTransport ships to use per wave: {ATTACK_SHIPS}")
 
         number_of_waves = read(
             msg="\nHow many times do you want to attack this city? (1 for a single attack): ",
