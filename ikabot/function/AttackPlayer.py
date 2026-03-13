@@ -70,27 +70,13 @@ def _force_origin_city_context(session, origin_city_id):
 
 def get_units(session, city):
     _force_origin_city_context(session, city["id"])
-
     params = {"view": "cityMilitary", "cityId": city["id"], "ajax": "1"}
     
     try:
         resp_text = session.post(params=params)
         resp = json.loads(resp_text, strict=False)
         
-        server_rel = "ownCity"
-        for update in resp:
-            if update[0] == "updateGlobalData":
-                server_rel = update[1].get('headerData', {}).get('relatedCity', {}).get('cssClass', 'ownCity')
-                break
-
-        is_special_view = server_rel in ['occupiedCities', 'deployedCities']
         html = ""
-        
-        if is_special_view:
-            params["view"] = "relatedCities"
-            resp_text = session.post(params=params)
-            resp = json.loads(resp_text, strict=False)
-
         for update in resp:
             if update[0] == "changeView":
                 html = update[1][1]
@@ -100,37 +86,39 @@ def get_units(session, city):
             return {}
 
         units = {}
-        if is_special_view:
-            # --- allies/garrison ---
-            # En relatedCities, tus tropas están en el primer 'contentBox01h'.
-            # Al dividir por esta clase, el índice [1] es tu sección, y el [2] es la guarnición ajena.
-            # Usamos [1] para aislarnos de los aliados/ocupados sin importar el idioma.
-            parts = html.split('class="contentBox01h"')
-            if len(parts) > 1:
-                html = parts[1] 
-            
-            mapping = {
-                'phalanx': '303', 'steamgiant': '308', 'spearman': '315',
-                'swordsman': '302', 'slinger': '301', 'archer': '313',
-                'marksman': '304', 'ram': '307', 'catapult': '306',
-                'mortar': '305', 'gyrocopter': '312', 'bombardier': '309',
-                'cook': '310', 'medic': '311', 'spartan': '319'
-            }
-            found = re.findall(r'class="armybutton (\w+)">\s*(\d+)\s*</div>', html)
-            for u_class, u_amount in found:
-                u_id = mapping.get(u_class)
-                if u_id:
-                    units[u_id] = {"name": u_class.capitalize(), "amount": int(u_amount)}
-        else:
-            # Own Cities
-            html_units = html.split('<div class="fleet')[0]
-            unit_id_names = re.findall(r'<div class="army (s\d+)">\s*<div class="tooltip">(.*?)<\/div>', html_units)
-            unit_amounts = re.findall(r"<td>\s*([\d,.-]+)\s*<\/td>", html_units)
-            for i in range(min(len(unit_id_names), len(unit_amounts))):
-                amount = int(unit_amounts[i].replace(",", "").replace("-", "0").strip())
-                if amount > 0:
-                    u_id = unit_id_names[i][0].replace('s', '')
-                    units[u_id] = {"name": decodeUnicodeEscape(unit_id_names[i][1]), "amount": amount}
+        # Separamos la sección de tierra de la de barcos para evitar conflictos [cite: 98]
+        html_units = html.split('<div class="fleet')[0]
+        
+        # Localizamos todas las tablas de unidades terrestres 
+        tables = re.findall(r'<table[^>]*class="[^"]*militaryList[^"]*"[^>]*>(.*?)</table>', html_units, re.DOTALL)
+        
+        for table_html in tables:
+            # 1. Extraemos IDs de las unidades (s301, s303, etc.) [cite: 37, 39, 41]
+            ids = re.findall(r'class="army (s\d+)"', table_html)
+            # 2. Extraemos nombres de los tooltips [cite: 37, 39, 42]
+            names = re.findall(r'<div class="tooltip">([^<]+)</div>', table_html)
+            # 3. Extraemos todos los valores de la fila de conteo [cite: 55, 82]
+            # Usamos una regex que capture el contenido de los TD, incluyendo el espacio de miles \u00a0 
+            amounts_row = re.search(r'<tr class="count">.*?<td>.*?</td>(.*?)</tr>', table_html, re.DOTALL)
+            if not amounts_row:
+                continue
+                
+            raw_amounts = re.findall(r'<td>\s*([\d\u00a0,.-]+)\s*</td>', amounts_row.group(1))
+
+            # Sincronizamos los datos de la tabla actual por índice
+            for i in range(min(len(ids), len(raw_amounts))):
+                u_id = ids[i].replace('s', '')
+                u_name = decodeUnicodeEscape(names[i])
+                
+                # Limpieza absoluta de caracteres de formato y espacios de miles 
+                amount_str = raw_amounts[i].replace('\u00a0', '').replace('.', '').replace(',', '').replace('-', '0').strip()
+                
+                try:
+                    amount = int(amount_str)
+                    if amount > 0:
+                        units[u_id] = {"name": u_name, "amount": amount}
+                except ValueError:
+                    continue
         
         return units
     except Exception as e:
@@ -331,7 +319,7 @@ def AttackPlayer(session, event, stdin_fd, predetermined_input):
         # Reasignamos la variable preguntando al usuario
         ATTACK_SHIPS = int(read(
             msg=f"\nHow many transport ships to use per wave? (available: {available_ships}): ",
-            min=0, max=available_ships, default=available_ships
+            min=0, max=999, default=available_ships
         ))
         #print(f"\nTransport ships to use per wave: {ATTACK_SHIPS}")
 
