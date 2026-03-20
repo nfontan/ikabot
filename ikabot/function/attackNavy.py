@@ -1,6 +1,5 @@
 #! /usr/bin/env python3
 # -*- coding: utf-8 -*-
-print(">>> USING NEW attackNavy SCRIPT WITH MODES & LOG <<<")
 
 import json
 import math
@@ -134,85 +133,99 @@ def get_units(session, city):
 
 def get_ships_from_city(session, city):
     """
-    Reads warships from tabShips in cityMilitary.
+    Lee barcos de guerra detectando si la ciudad es propia u ocupada/aliada.
+    Versión internacionalizada corregida para detectar correctamente las unidades propias.
     """
     _force_origin_city_context(session, city["id"])
+    
     params = {
         "view": "cityMilitary",
         "activeTab": "tabShips",
-        "currentTab": "tabShips",
-        "backgroundView": "city",
-        "currentCityId": city["id"],
         "cityId": city["id"],
-        "templateView": "cityMilitary",
-        "actionRequest": actionRequest,
-        "ajax": "1",
+        "ajax": "1"
     }
+    
     try:
         resp_text = session.post(params=params)
         resp = json.loads(resp_text, strict=False)
-        html = resp[1][1][1]
+        
+        server_rel = "ownCity"
+        for update in resp:
+            if update[0] == "updateGlobalData":
+                server_rel = update[1].get('headerData', {}).get('relatedCity', {}).get('cssClass', 'ownCity')
+                break
+
+        is_special_view = server_rel in ['occupiedCities', 'deployedCities']
+        html = ""
+
+        if is_special_view:
+            params["view"] = "relatedCities"
+            resp_text = session.post(params=params)
+            resp = json.loads(resp_text, strict=False)
+
+        for update in resp:
+            if update[0] == "changeView":
+                html = update[1][1]
+                break
+
+        if not html:
+            return {}
 
         ships = {}
+        ship_mapping = {
+            'ship_ram': '210', 'ship_flamethrower': '211', 'ship_steamboat': '216',
+            'ship_catapult': '213', 'ship_mortar': '214', 'ship_submarine': '215',
+            'ship_ballista': '212', 'ship_rocketship': '217', 'ship_paddlespeedship': '218',
+            'ship_tender': '219', 'ship_ballooncarrier': '220'
+        }
 
-        tables = re.findall(
-            r'<table class="table01 center militaryList fixed">(.*?)</table>',
-            html,
-            flags=re.DOTALL
-        )
-
-        for table_html in tables:
-            title_row_match = re.search(
-                r'<tr class="title_img_row">(.*?)</tr>',
-                table_html,
-                flags=re.DOTALL
-            )
-            count_row_match = re.search(
-                r'<tr class="count">(.*?)</tr>',
-                table_html,
-                flags=re.DOTALL
-            )
-            if not title_row_match or not count_row_match:
-                continue
-
-            title_row = title_row_match.group(1)
-            count_row = count_row_match.group(1)
-
-            count_cells = re.findall(
-                r'<td>(.*?)</td>',
-                count_row,
-                flags=re.DOTALL
-            )
-
-            if len(count_cells) <= 1:
-                continue
-
-            title_fleets = re.findall(
-                r'<div class="fleet (s\d+)">\s*<div class="tooltip">(.*?)</div>',
-                title_row,
-                flags=re.DOTALL
-            )
-
-            for idx, (sid, sname) in enumerate(title_fleets):
-                if idx + 1 >= len(count_cells):
+        if is_special_view:
+            # --- LÓGICA INTERNACIONAL CORREGIDA ---
+            # Separamos por cada bloque de contenido (tablas de unidades)
+            parts = html.split('class="contentBox01h"')
+            target_html = ""
+            
+            for part in parts:
+                # Buscamos la sección que contiene el formulario de cambio de ciudad natal
+                # Usamos una búsqueda parcial del ID para cubrir 'changeHomeCityForm' y 'changeHomeCityForm2'
+                if 'id="changeHomeCityForm' in part:
+                    target_html = part
                     break
-                raw_amount = count_cells[idx + 1]
-                amount = int(
-                    raw_amount.replace(",", "")
-                              .replace("-", "0")
-                              .strip()
-                )
-                ship_id = sid.replace("s", "")
-                ship_name = decodeUnicodeEscape(sname)
+            
+            # Si no se encontró el bloque específico, buscamos en todo el HTML como respaldo
+            if not target_html:
+                target_html = html
 
-                if amount > 0:
-                    ships[ship_id] = {
-                        "name": ship_name,
-                        "amount": amount
-                    }
+            # En estas vistas el servidor usa 'fleetbutton' seguido de la clase de la unidad
+            found = re.findall(r'class="fleetbutton (\w+)">\s*([\d\u00a0,.-]+)\s*</div>', target_html)
+            for s_class, s_amount in found:
+                s_id = ship_mapping.get(s_class)
+                if s_id:
+                    # Limpieza profunda de separadores de miles y formatos regionales
+                    amount_str = s_amount.replace('\u00a0', '').replace('.', '').replace(',', '').replace('-', '0').strip()
+                    amount = int(amount_str)
+                    if amount > 0:
+                        ships[s_id] = {"name": s_class.replace('ship_', '').capitalize(), "amount": amount}
+        else:
+            # --- LÓGICA PARA CIUDADES PROPIAS ---
+            html_ships = html.split('<div class="fleet')[0]
+            tables = re.findall(r'<table[^>]*class="[^"]*militaryList[^"]*"[^>]*>(.*?)</table>', html_ships, re.DOTALL)
+            for table_html in tables:
+                title_fleets = re.findall(r'<div class="fleet (s\d+)">\s*<div class="tooltip">(.*?)</div>', table_html, re.DOTALL)
+                amounts_row = re.search(r'<tr class="count">.*?<td>.*?</td>(.*?)</tr>', table_html, re.DOTALL)
+                if not amounts_row: continue
+                raw_amounts = re.findall(r'<td>\s*([\d\u00a0,.-]+)\s*</td>', amounts_row.group(1))
+                for idx, (sid, sname) in enumerate(title_fleets):
+                    if idx >= len(raw_amounts): break
+                    amount_str = raw_amounts[idx].replace('\u00a0', '').replace('.', '').replace(',', '').replace('-', '0').strip()
+                    amount = int(amount_str)
+                    ship_id = sid.replace("s", "")
+                    if amount > 0:
+                        ships[ship_id] = {"name": decodeUnicodeEscape(sname), "amount": amount}
 
         return ships
-    except Exception:
+    except Exception as e:
+        navy_log(f"Error en get_ships_from_city: {str(e)}", level="ERROR")
         return {}
 
 def get_available_ships_in_city(session, city):
@@ -291,7 +304,7 @@ def attackNavy(session, event, stdin_fd, predetermined_input):
 
         banner()
         print("Select city of origin")
-        origin_city = chooseCity(session)
+        origin_city = chooseCity(session, foreign=True)
         if not origin_city:
             return
 
