@@ -1,5 +1,6 @@
 #! /usr/bin/env python3
 # -*- coding: utf-8 -*-
+print(">>> USING NEW attackNavy SCRIPT WITH MODES & LOG <<<")
 
 import json
 import math
@@ -134,9 +135,9 @@ def get_units(session, city):
 def get_ships_from_city(session, city):
     """
     Lee barcos de guerra detectando si la ciudad es propia u ocupada/aliada.
-    Versión internacionalizada corregida para detectar correctamente las unidades propias.
+    Corregido para asegurar la detecciÃ³n en ciudades PROPIAS y AJENAS sin depender del idioma.
     """
-    _force_origin_city_context(session, city["id"])
+    _force_origin_city_context(session, city["id"]) # 
     
     params = {
         "view": "cityMilitary",
@@ -146,32 +147,33 @@ def get_ships_from_city(session, city):
     }
     
     try:
-        resp_text = session.post(params=params)
-        resp = json.loads(resp_text, strict=False)
+        resp_text = session.post(params=params) # [cite: 8]
+        resp = json.loads(resp_text, strict=False) # [cite: 28]
         
         server_rel = "ownCity"
         for update in resp:
             if update[0] == "updateGlobalData":
-                server_rel = update[1].get('headerData', {}).get('relatedCity', {}).get('cssClass', 'ownCity')
+                server_rel = update[1].get('headerData', {}).get('relatedCity', {}).get('cssClass', 'ownCity') # [cite: 16]
                 break
 
-        is_special_view = server_rel in ['occupiedCities', 'deployedCities']
+        is_special_view = server_rel in ['occupiedCities', 'deployedCities'] # [cite: 16]
         html = ""
 
         if is_special_view:
-            params["view"] = "relatedCities"
-            resp_text = session.post(params=params)
-            resp = json.loads(resp_text, strict=False)
+            params["view"] = "relatedCities" # [cite: 16]
+            resp_text = session.post(params=params) # [cite: 8]
+            resp = json.loads(resp_text, strict=False) # [cite: 28]
 
         for update in resp:
             if update[0] == "changeView":
-                html = update[1][1]
+                html = update[1][1] # [cite: 32, 284]
                 break
 
         if not html:
             return {}
 
         ships = {}
+        # Mapeo universal de clases CSS a IDs de flota [cite: 51]
         ship_mapping = {
             'ship_ram': '210', 'ship_flamethrower': '211', 'ship_steamboat': '216',
             'ship_catapult': '213', 'ship_mortar': '214', 'ship_submarine': '215',
@@ -180,48 +182,52 @@ def get_ships_from_city(session, city):
         }
 
         if is_special_view:
-            # --- LÓGICA INTERNACIONAL CORREGIDA ---
-            # Separamos por cada bloque de contenido (tablas de unidades)
+            # --- LÃ“GICA PARA CIUDADES AJENAS (Aliadas/Ocupadas) ---
             parts = html.split('class="contentBox01h"')
             target_html = ""
-            
             for part in parts:
-                # Buscamos la sección que contiene el formulario de cambio de ciudad natal
-                # Usamos una búsqueda parcial del ID para cubrir 'changeHomeCityForm' y 'changeHomeCityForm2'
-                if 'id="changeHomeCityForm' in part:
+                if 'id="changeHomeCityForm' in part: # [cite: 2008, 2010]
                     target_html = part
                     break
             
-            # Si no se encontró el bloque específico, buscamos en todo el HTML como respaldo
-            if not target_html:
-                target_html = html
+            if not target_html: target_html = html
 
-            # En estas vistas el servidor usa 'fleetbutton' seguido de la clase de la unidad
-            found = re.findall(r'class="fleetbutton (\w+)">\s*([\d\u00a0,.-]+)\s*</div>', target_html)
+            found = re.findall(r'class="fleetbutton (\w+)">\s*([\d\u00a0,.-]+)\s*</div>', target_html) # [cite: 2020]
             for s_class, s_amount in found:
                 s_id = ship_mapping.get(s_class)
                 if s_id:
-                    # Limpieza profunda de separadores de miles y formatos regionales
-                    amount_str = s_amount.replace('\u00a0', '').replace('.', '').replace(',', '').replace('-', '0').strip()
-                    amount = int(amount_str)
+                    amount = int(s_amount.replace('\u00a0', '').replace('.', '').replace(',', '').replace('-', '0').strip()) # 
                     if amount > 0:
                         ships[s_id] = {"name": s_class.replace('ship_', '').capitalize(), "amount": amount}
         else:
-            # --- LÓGICA PARA CIUDADES PROPIAS ---
-            html_ships = html.split('<div class="fleet')[0]
-            tables = re.findall(r'<table[^>]*class="[^"]*militaryList[^"]*"[^>]*>(.*?)</table>', html_ships, re.DOTALL)
+            # --- LÃ“GICA PARA CIUDADES PROPIAS (REVISADA) ---
+            # Separamos las tablas militares para evitar mezclar con barcos mercantes 
+            tables = re.findall(r'<table[^>]*class="[^"]*militaryList[^"]*"[^>]*>(.*?)</table>', html, re.DOTALL) # 
+            
             for table_html in tables:
-                title_fleets = re.findall(r'<div class="fleet (s\d+)">\s*<div class="tooltip">(.*?)</div>', table_html, re.DOTALL)
-                amounts_row = re.search(r'<tr class="count">.*?<td>.*?</td>(.*?)</tr>', table_html, re.DOTALL)
-                if not amounts_row: continue
-                raw_amounts = re.findall(r'<td>\s*([\d\u00a0,.-]+)\s*</td>', amounts_row.group(1))
-                for idx, (sid, sname) in enumerate(title_fleets):
-                    if idx >= len(raw_amounts): break
-                    amount_str = raw_amounts[idx].replace('\u00a0', '').replace('.', '').replace(',', '').replace('-', '0').strip()
-                    amount = int(amount_str)
-                    ship_id = sid.replace("s", "")
-                    if amount > 0:
-                        ships[ship_id] = {"name": decodeUnicodeEscape(sname), "amount": amount}
+                # Buscamos los IDs de los barcos (ej: s216) y sus nombres 
+                ids = re.findall(r'class="fleet (s\d+)"', table_html) # 
+                names = re.findall(r'<div class="tooltip">([^<]+)</div>', table_html) # 
+                
+                # Buscamos la fila de cantidades 
+                amounts_row = re.search(r'<tr class="count">.*?<td>.*?</td>(.*?)</tr>', table_html, re.DOTALL) # 
+                if not amounts_row:
+                    continue
+                    
+                raw_amounts = re.findall(r'<td>\s*([\d\u00a0,.-]+)\s*</td>', amounts_row.group(1)) # 
+
+                for i in range(min(len(ids), len(raw_amounts))):
+                    ship_id = ids[i].replace('s', '')
+                    ship_name = decodeUnicodeEscape(names[i])
+                    # Limpieza absoluta de carÃ¡cteres para cualquier idioma 
+                    amount_str = raw_amounts[i].replace('\u00a0', '').replace('.', '').replace(',', '').replace('-', '0').strip()
+                    
+                    try:
+                        amount = int(amount_str)
+                        if amount > 0:
+                            ships[ship_id] = {"name": ship_name, "amount": amount}
+                    except ValueError:
+                        continue
 
         return ships
     except Exception as e:
@@ -455,7 +461,7 @@ def attackNavy(session, event, stdin_fd, predetermined_input):
                         )
                         wait(interval_seconds)
 
-                # random delay 1�20 seconds added on top of base wait in both modes
+                # random delay 1ï¿½20 seconds added on top of base wait in both modes
                 delay = random.randint(1, 20)
                 wait(delay)
                 navy_log(f"WAVE {wave_number}: random delay before send = {delay}s")
@@ -525,7 +531,7 @@ def attackNavy(session, event, stdin_fd, predetermined_input):
                     pass
 
             try:
-                if send_notifications: # <--- Cambio aquí
+                if send_notifications: # <--- Cambio aquÃ­
                     status_text = "Success" if success else f"Failed ({server_msg})"
                     sendToBot(
                         session,
