@@ -35,18 +35,15 @@ def obtainMiraclesAvailable(session):
 
     ids, cities = getIdsOfCities(session)
     for city_id in cities:
-        city = cities[city_id]
+        city_info = cities[city_id]
         # get the wonder for this city
         wonder = [
             island["wonder"]
             for island in islands
-            if city["coords"] == "[{}:{}] ".format(island["x"], island["y"])
+            if city_info["coords"] == "[{}:{}] ".format(island["x"], island["y"])
         ][0]
-        # if the wonder is not new, continue
-        if wonder in [island["wonder"] for island in islands if island["activable"]]:
-            continue
 
-        html = session.get(city_url + str(city["id"]))
+        html = session.get(city_url + str(city_info["id"]))
         city = getCity(html)
 
         # make sure that the city has a temple
@@ -75,11 +72,22 @@ def obtainMiraclesAvailable(session):
         if match:
             level = int(match.group(1))
 
+        # Check if we already have this wonder type in our activable list
+        existing_best = next((i for i in islands if i["activable"] and i["wonder"] == wonder), None)
+        
+        if existing_best:
+            # If the current city has a higher level, deactivate the previous one
+            if level > existing_best["wonderActivationLevel"]:
+                existing_best["activable"] = False
+            else:
+                # If existing is better or equal, skip this city
+                continue
+
         data = data[2][1]
         available = data["js_WonderViewButton"]["buttonState"] == "enabled"
         if available is False:
             for elem in data:
-                if "countdown" in data[elem]:
+                if isinstance(data[elem], dict) and "countdown" in data[elem]:
                     enddate = data[elem]["countdown"]["enddate"]
                     currentdate = data[elem]["countdown"]["currentdate"]
                     break
