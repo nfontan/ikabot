@@ -332,7 +332,8 @@ def AttackPlayer(session, event, stdin_fd, predetermined_input):
             max_amount = unit_data['amount']
             amount_to_send = int(read(
                 msg=f"  Send {unit_name} (available: {addThousandSeparator(max_amount)}): ",
-                min=0, max=max_amount, default=0
+                #min=0, max=max_amount, default=0
+                min=0, max=999, default=0
             ))
             if amount_to_send > 0:
                 selected_units_payload[unit_id] = amount_to_send
@@ -394,10 +395,9 @@ def AttackPlayer(session, event, stdin_fd, predetermined_input):
         )
 
         same_island = str(origin_city.get('islandId', '')) == str(target_city.get('island_id', ''))
-        attack_function = 'plunder' if same_island else 'sendArmyPlunderSea'
+        attack_function = 'sendArmyPlunderLand' if same_island else 'sendArmyPlunderSea'
 
-        # ?? ???? ????? ????? ??? ?? ???? ????? ATTACK_SHIPS ????? ??? ?????
-        if attack_function != 'plunder':
+        if not same_island:
             _wait_until_ships_full(session, origin_city["id"], ATTACK_SHIPS)
 
         payload_base = {
@@ -415,9 +415,7 @@ def AttackPlayer(session, event, stdin_fd, predetermined_input):
             "ajax": "1"
         }
 
-        if attack_function != 'plunder':
-            # ??? ????? ?????? ???? ????? ?????
-            payload_base["transporter"] = str(ATTACK_SHIPS)
+        payload_base["transporter"] = str(ATTACK_SHIPS)
 
         for unit_id in ALL_POSSIBLE_ARMY_UNIT_GAME_IDS:
             payload_base[f"cargo_army_{unit_id}"] = str(selected_units_payload.get(unit_id, 0))
