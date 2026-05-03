@@ -964,7 +964,8 @@ class Session:
         sessionData = self.getSessionData()
 
         try:
-            if self.s.cookies["PHPSESSID"] != sessionData["cookies"]["PHPSESSID"]:
+            #if self.s.cookies["PHPSESSID"] != sessionData["cookies"]["PHPSESSID"]:
+            if next(c.value for c in self.s.cookies if c.name == "PHPSESSID") != sessionData["cookies"]["PHPSESSID"]:
                 self.__getCookie(sessionData)
             else:
                 try:
@@ -1014,7 +1015,8 @@ class Session:
         sessionData = self.getSessionData()
 
         try:
-            if self.s.cookies["PHPSESSID"] != sessionData["cookies"]["PHPSESSID"]:
+            #if self.s.cookies["PHPSESSID"] != sessionData["cookies"]["PHPSESSID"]:
+            if next(c.value for c in self.s.cookies if c.name == "PHPSESSID") != sessionData["cookies"]["PHPSESSID"]:
                 self.__getCookie(sessionData)
         except KeyError:
             try:
