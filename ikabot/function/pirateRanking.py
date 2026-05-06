@@ -5,6 +5,8 @@ import re
 import sys
 import json
 import os
+import random
+import time
 from datetime import datetime
 
 from ikabot.config import *
@@ -63,7 +65,6 @@ def do_it(session):
     city_id = city_with_max["id"]
     
     # Open pirate fortress and view ranking
-    # Use session.get() with the path - it appends to urlBase automatically
     path = "view=pirateFortress&cityId={}&position=17&activeTab=tabRanking&backgroundView=city&currentCityId={}&actionRequest={}&ajax=1".format(
         city_id, city_id, actionRequest
     )
@@ -71,6 +72,29 @@ def do_it(session):
     
     # Parse ranking data from the response
     ranking_data = parse_ranking(html)
+    
+    # Get coordinates for each player
+    if ranking_data and "ranking" in ranking_data:
+        ranking = ranking_data["ranking"]
+        
+        # For each player with cityId, get their island coordinates
+        for entry in ranking:
+            if 'cityId' in entry:
+                # Random delay between 2-5 seconds to simulate human behavior
+                delay = random.uniform(2, 5)
+                time.sleep(delay)
+                
+                # Visit the player's island to get coordinates
+                island_path = "view=island&cityId={}".format(entry['cityId'])
+                try:
+                    island_html = session.get(island_path)
+                    coords = parse_island_coordinates(island_html)
+                    if coords:
+                        entry['x'] = coords['x']
+                        entry['y'] = coords['y']
+                        entry['island'] = coords.get('island_name', 'Unknown')
+                except Exception as e:
+                    print("Error getting coordinates for {}: {}".format(entry['name'], e))
     
     # Write to file
     report_path = "/tmp/pirate_ranking_report.txt"
@@ -85,13 +109,22 @@ def do_it(session):
         if ranking_data and "ranking" in ranking_data:
             ranking = ranking_data["ranking"]
             f.write("Ranking (showing {} players):\n\n".format(len(ranking)))
-            f.write("{:<6} {:<30} {}\n".format("Pos", "Player Name", "Points"))
-            f.write("-" * 50 + "\n")
+            f.write("{:<6} {:<35} {:<12} {:<8} {:<8} {}\n".format("Pos", "Player Name", "Points", "X", "Y", "Island"))
+            f.write("-" * 85 + "\n")
             for entry in ranking:
-                f.write("{:<6} {:<30} {}\n".format(
+                x = entry.get('x', '?')
+                y = entry.get('y', '?')
+                island = entry.get('island', '?')
+                name = entry['name']
+                if entry.get('bold'):
+                    name = name + " (*)"
+                f.write("{:<6} {:<35} {:<12} {:<8} {:<8} {}\n".format(
                     entry['position'],
-                    entry['name'],
-                    entry['points']
+                    name,
+                    entry['points'],
+                    x,
+                    y,
+                    island
                 ))
         elif ranking_data:
             f.write("Could not parse ranking data.\n")
@@ -105,7 +138,7 @@ def do_it(session):
 
 
 def parse_ranking_from_html(html):
-    """Parse the ranking HTML to extract player positions, names, and points"""
+    """Parse the ranking HTML to extract player positions, names, points, cityId, and bold status"""
     ranking = []
     
     # The HTML might be escaped in JSON - replace escaped characters
@@ -125,16 +158,15 @@ def parse_ranking_from_html(html):
     
     ul_content = match.group(1)
     
-    # Find all LI elements that contain ranking data
-    # Each LI should have class="..." and contain place, pirateBooty, and userName
-    li_pattern = r'<li[^>]*class="[^"]*"[^>]*>(.*?)</li>'
-    li_matches = re.findall(li_pattern, ul_content, re.DOTALL)
+    # Find all LI elements with their full tag (including attributes)
+    # Pattern to capture the entire LI tag with attributes and content
+    li_full_pattern = r'<li([^>]*)>(.*?)</li>'
+    li_matches = re.findall(li_full_pattern, ul_content, re.DOTALL)
     
-    for li_content in li_matches:
+    for li_attrs, li_content in li_matches:
         # Check if this LI has ranking data
         if 'class="place"' not in li_content and 'class="place"' not in ul_content:
-            # Try to find place and pirateBooty in this LI or its context
-            pass
+            continue
         
         # Extract position
         pos_match = re.search(r'<span class="place"[^>]*>(\d+)\s*\.</span>', li_content)
@@ -148,15 +180,23 @@ def parse_ranking_from_html(html):
         if not points_match:
             continue
         
-        # Extract player name
+        # Check if bold (has "bold" in class attribute)
+        is_bold = 'bold' in li_attrs
+        
+        # Extract player name and cityId
         name = "Unknown"
-        # Pattern 1: <span ... class="userName" title="...">
+        city_id = None
+        
+        # Try to extract from <a> tag with onclick that contains cityId
+        city_id_match = re.search(r'view=island&cityId=(\d+)', li_content)
+        if city_id_match:
+            city_id = int(city_id_match.group(1))
+        
+        # Extract player name
         name_match = re.search(r'<span[^>]*class="[^"]*userName[^"]*"[^>]*title="([^"]*)"', li_content)
         if not name_match:
-            # Pattern 2: <a class="userName" ... title="...">
             name_match = re.search(r'<a[^>]*class="[^"]*userName[^"]*"[^>]*title="([^"]*)"', li_content)
         if not name_match:
-            # Pattern 3: <a class="userName" ...>name</a>
             name_match = re.search(r'<a[^>]*class="[^"]*userName[^"]*"[^>]*>([^<]+)</a>', li_content)
         if name_match:
             name = name_match.group(1).strip()
@@ -166,15 +206,69 @@ def parse_ranking_from_html(html):
             points_str = points_match.group(1).replace(' ', '').replace('\xa0', '').replace(' ', '')
             try:
                 points = int(points_str)
-                ranking.append({
+                entry = {
                     'position': position,
                     'name': name,
-                    'points': points
-                })
+                    'points': points,
+                    'bold': is_bold
+                }
+                if city_id:
+                    entry['cityId'] = city_id
+                ranking.append(entry)
             except ValueError:
                 pass
     
     return ranking if ranking else None
+
+
+def parse_island_coordinates(html):
+    """Parse island coordinates from the HTML response"""
+    try:
+        # First try to parse as JSON (AJAX response)
+        try:
+            data = json.loads(html)
+            # Search for coordinates in the JSON structure
+            def find_coords(obj):
+                if isinstance(obj, dict):
+                    if 'islandXCoord' in obj and 'islandYCoord' in obj:
+                        return {
+                            'x': obj['islandXCoord'],
+                            'y': obj['islandYCoord'],
+                            'island_name': obj.get('islandName', 'Unknown')
+                        }
+                    for v in obj.values():
+                        result = find_coords(v)
+                        if result:
+                            return result
+                elif isinstance(obj, list):
+                    for item in obj:
+                        result = find_coords(item)
+                        if result:
+                            return result
+                return None
+            
+            result = find_coords(data)
+            if result:
+                return result
+        except json.JSONDecodeError:
+            pass
+        
+        # If not JSON, try to extract from HTML
+        # Pattern: "islandXCoord":"41","islandYCoord":"11"
+        x_match = re.search(r'"islandXCoord"\s*:\s*"(\d+)"', html)
+        y_match = re.search(r'"islandYCoord"\s*:\s*"(\d+)"', html)
+        name_match = re.search(r'"islandName"\s*:\s*"([^"]+)"', html)
+        
+        if x_match and y_match:
+            return {
+                'x': x_match.group(1),
+                'y': y_match.group(1),
+                'island_name': name_match.group(1) if name_match else 'Unknown'
+            }
+        
+        return None
+    except Exception as e:
+        return None
 
 
 def parse_ranking(html):
