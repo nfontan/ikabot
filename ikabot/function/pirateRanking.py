@@ -12,8 +12,9 @@ from datetime import datetime
 from ikabot.config import *
 from ikabot.helpers.getJson import *
 from ikabot.helpers.gui import *
-from ikabot.helpers.pedirInfo import getIdsOfCities
+from ikabot.helpers.pedirInfo import getIdsOfCities, read, enter
 from ikabot.helpers.process import run, set_child_mode
+from ikabot.helpers.botComm import sendToBot, checkTelegramData
 
 
 def pirateRanking(session, event, stdin_fd, predetermined_input):
@@ -28,18 +29,93 @@ def pirateRanking(session, event, stdin_fd, predetermined_input):
     sys.stdin = os.fdopen(stdin_fd)
     config.predetermined_input = predetermined_input
 
-    set_child_mode(session)
-    event.set()
-
     try:
-        do_it(session)
+        print("=== Pirate Ranking Configuration ===\n")
+
+        print("Output options:")
+        print("(1) Save to file only")
+        print("(2) Send to Telegram")
+        print("(3) Send to Pastebin (TODO)")
+        print("(4) File + Telegram")
+        print("(5) File + Pastebin (TODO)")
+        print("(6) Telegram + Pastebin (TODO)")
+        print("(7) All (File + Telegram + Pastebin) (TODO)")
+        output_option = read(min=1, max=7, digit=True)
+
+        send_telegram = output_option in [2, 4, 6, 7]
+        if send_telegram and checkTelegramData(session) is False:
+            print("Telegram is not configured. Disabling Telegram output.")
+            send_telegram = False
+            if output_option == 2:
+                output_option = 1
+            elif output_option == 4:
+                output_option = 1
+            elif output_option == 6:
+                output_option = 3
+            elif output_option == 7:
+                output_option = 1
+
+        send_pastebin = output_option in [3, 5, 6, 7]
+        save_file = output_option in [1, 4, 5, 7]
+
+        print("\nExecution options:")
+        print("(1) Run ranking now")
+        print("(2) Schedule ranking every X hours")
+        execution_option = read(min=1, max=2, digit=True)
+
+        interval_hours = None
+        if execution_option == 2:
+            print("\nRun every how many hours? (minimum 1)")
+            interval_hours = read(min=1, digit=True)
+
+        print("\n=== Configuration Summary ===")
+        print("Output: ", end="")
+        outputs = []
+        if save_file:
+            outputs.append("File")
+        if send_telegram:
+            outputs.append("Telegram")
+        if send_pastebin:
+            outputs.append("Pastebin (TODO)")
+        print(", ".join(outputs))
+        if execution_option == 1:
+            print("Execution: Run once now")
+        else:
+            print("Execution: Every {} hour(s)".format(interval_hours))
+        print("=" * 30 + "\n")
+
+        enter()
+
+        set_child_mode(session)
+        event.set()
+
+        if execution_option == 1:
+            do_it(session, save_file, send_telegram, send_pastebin)
+        else:
+            print("Scheduling pirate ranking every {} hour(s)".format(interval_hours))
+            print("Press Ctrl+C to stop")
+            while True:
+                try:
+                    do_it(session, save_file, send_telegram, send_pastebin)
+                    print("\nWaiting {} hour(s) for next run...".format(interval_hours))
+                    time.sleep(interval_hours * 3600)
+                except KeyboardInterrupt:
+                    print("\nScheduler stopped.")
+                    break
+                except Exception as e:
+                    print("Error in scheduled run: {}".format(e))
+                    time.sleep(60)
+
+    except KeyboardInterrupt:
+        event.set()
+        return
     except Exception as e:
         print("Error in pirateRanking: {}".format(e))
     finally:
         session.logout()
 
 
-def do_it(session):
+def do_it(session, save_file=True, send_telegram=False, send_pastebin=False):
     # Get all cities
     cities_ids = getIdsOfCities(session)[0]
     
@@ -72,9 +148,34 @@ def do_it(session):
     
     # Parse ranking data from the response
     ranking_data = parse_ranking(html)
-    
-    # Get coordinates for each player
+
+    # Check if ranking data is valid
+    skip_coordinates = False
     if ranking_data and "ranking" in ranking_data:
+        ranking = ranking_data["ranking"]
+        own_username = session.username if hasattr(session, 'username') else None
+        
+        # Check if own account has 0 points
+        if own_username:
+            for entry in ranking:
+                if entry['name'] == own_username and entry['points'] == 0:
+                    print("Account {} is in ranking with 0 points. Skipping coordinate collection.".format(own_username))
+                    skip_coordinates = True
+                    break
+        
+        # If no own account found but all players have 0 points, skip too
+        if not skip_coordinates:
+            all_zero = all(entry['points'] == 0 for entry in ranking)
+            if all_zero and len(ranking) > 0:
+                print("All players in ranking have 0 points. Skipping coordinate collection.")
+                skip_coordinates = True
+    else:
+        # If no ranking data or parsing failed, skip coordinates
+        print("Ranking data could not be parsed or is invalid. Skipping coordinate collection.")
+        skip_coordinates = True
+
+    # Get coordinates for each player (skip if ranking seems invalid)
+    if ranking_data and "ranking" in ranking_data and not skip_coordinates:
         ranking = ranking_data["ranking"]
         
         # For each player with cityId, get their island coordinates
@@ -96,45 +197,68 @@ def do_it(session):
                 except Exception as e:
                     print("Error getting coordinates for {}: {}".format(entry['name'], e))
     
-    # Write to file
-    report_path = "/tmp/pirate_ranking_report.txt"
+    # Generate report content
+    report_lines = []
+    report_lines.append("Pirate Fortress Ranking Report")
+    report_lines.append("Generated: {}".format(datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+    report_lines.append("City: {} (ID: {})".format(city_with_max["name"], city_id))
+    report_lines.append("Fortress Level: {}".format(max_level))
+    # Add account name if available
+    if hasattr(session, 'username') and session.username:
+        report_lines.append("Account: {}".format(session.username))
+    report_lines.append("=" * 50)
+    report_lines.append("")
     
-    with open(report_path, "w", encoding="utf-8") as f:
-        f.write("Pirate Fortress Ranking Report\n")
-        f.write("Generated: {}\n".format(datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
-        f.write("City: {} (ID: {})\n".format(city_with_max["name"], city_id))
-        f.write("Fortress Level: {}\n".format(max_level))
-        f.write("=" * 50 + "\n\n")
-        
-        if ranking_data and "ranking" in ranking_data:
-            ranking = ranking_data["ranking"]
-            f.write("Ranking (showing {} players):\n\n".format(len(ranking)))
-            f.write("{:<6} {:<35} {:<12} {:<8} {:<8} {}\n".format("Pos", "Player Name", "Points", "X", "Y", "Island"))
-            f.write("-" * 85 + "\n")
-            for entry in ranking:
-                x = entry.get('x', '?')
-                y = entry.get('y', '?')
-                island = entry.get('island', '?')
-                name = entry['name']
-                if entry.get('bold'):
-                    name = name + " (*)"
-                f.write("{:<6} {:<35} {:<12} {:<8} {:<8} {}\n".format(
-                    entry['position'],
-                    name,
-                    entry['points'],
-                    x,
-                    y,
-                    island
-                ))
-        elif ranking_data:
-            f.write("Could not parse ranking data.\n")
-            f.write(json.dumps(ranking_data, indent=2, ensure_ascii=False))
-        else:
-            f.write("Could not parse ranking data.\n")
-            f.write("Raw HTML (first 10000 chars):\n")
-            f.write(html[:10000])
+    if ranking_data and "ranking" in ranking_data:
+        ranking = ranking_data["ranking"]
+        report_lines.append("Ranking (showing {} players):".format(len(ranking)))
+        report_lines.append("")
+        report_lines.append("{:<6} {:<35} {:<12} {:<8} {:<8} {}".format("Pos", "Player Name", "Points", "X", "Y", "Island"))
+        report_lines.append("-" * 85)
+        for entry in ranking:
+            x = entry.get('x', '?')
+            y = entry.get('y', '?')
+            island = entry.get('island', '?')
+            name = entry['name']
+            if entry.get('bold'):
+                name = name + " (*)"
+            report_lines.append("{:<6} {:<35} {:<12} {:<8} {:<8} {}".format(
+                entry['position'],
+                name,
+                entry['points'],
+                x,
+                y,
+                island
+            ))
+    else:
+        # Simplified error message (no HTML/JSON dump)
+        report_lines.append("Ranking data is not available or could not be parsed.")
+        if ranking_data and "error" in ranking_data:
+            report_lines.append("Reason: {}".format(ranking_data["error"]))
+        report_lines.append("Note: This may happen when your account has 0 points in ranking.")
     
-    print("Report saved to: {}".format(report_path))
+    report_content = "\n".join(report_lines) + "\n"
+    
+    # Save to file
+    if save_file:
+        report_path = "/tmp/pirate_ranking_report.txt"
+        with open(report_path, "w", encoding="utf-8") as f:
+            f.write(report_content)
+        print("Report saved to: {}".format(report_path))
+    
+    # Send to Telegram
+    if send_telegram:
+        try:
+            sendToBot(session, report_content)
+            print("Report sent to Telegram")
+        except Exception as e:
+            print("Error sending to Telegram: {}".format(e))
+    
+    # Send to Pastebin (TODO)
+    if send_pastebin:
+        print("Pastebin support not implemented yet")
+    
+    print("Ranking update completed.")
 
 
 def parse_ranking_from_html(html):
