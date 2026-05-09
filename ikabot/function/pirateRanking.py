@@ -104,9 +104,14 @@ def pirateRanking(session, event, stdin_fd, predetermined_input):
         if send_pastebin:
             saved = get_saved_pastebin_config(session)
             if saved:
-                print("Pastebin configuration loaded from saved data.")
-                pastebin_config = saved
-            else:
+                print("Pastebin configuration found. Press Enter to use saved data, or 'r' to reconfigure:")
+                reconf = read()
+                if reconf.lower() == 'r':
+                    saved = None
+                else:
+                    print("Using saved Pastebin configuration.")
+                    pastebin_config = saved
+            if not saved:
                 print("\n--- Pastebin Configuration ---")
                 print("Get your API developer key at: https://pastebin.com/doc_api (login required)")
                 print("Pastebin Developer API Key:")
@@ -196,40 +201,41 @@ def pirateRanking(session, event, stdin_fd, predetermined_input):
             print("Execution: Daily at {:02d}:{:02d}".format(scheduled_time[0], scheduled_time[1]))
         print("=" * 30 + "\n")
 
-        enter()
-
-        set_child_mode(session)
-        event.set()
-
-        if execution_option == 1:
-            do_it(session, save_file, send_telegram, send_pastebin, pastebin_config)
-        else:
-            now = datetime.now()
-            target = now.replace(hour=scheduled_time[0], minute=scheduled_time[1], second=0, microsecond=0)
-            if target <= now:
-                target += timedelta(days=1)
-            sleep_seconds = (target - now).total_seconds()
-            print("Scheduled daily at {:02d}:{:02d}".format(scheduled_time[0], scheduled_time[1]))
-            print("Next run in {:.1f} hours".format(sleep_seconds / 3600))
-            print("Press Ctrl+C to stop")
-            while True:
-                try:
-                    time.sleep(sleep_seconds)
-                    do_it(session, save_file, send_telegram, send_pastebin, pastebin_config)
-                    sleep_seconds = 86400
-                except KeyboardInterrupt:
-                    print("\nScheduler stopped.")
-                    break
-                except Exception as e:
-                    print("Error in scheduled run: {}".format(e))
-                    time.sleep(60)
-
+        read()
     except KeyboardInterrupt:
         event.set()
         return
-    except Exception as e:
-        print("Error in pirateRanking: {}".format(e))
-    finally:
+
+    set_child_mode(session)
+    event.set()
+
+    if execution_option == 1:
+        try:
+            do_it(session, save_file, send_telegram, send_pastebin, pastebin_config)
+        except Exception as e:
+            print("Error: {}".format(e))
+        finally:
+            session.logout()
+    else:
+        now = datetime.now()
+        target = now.replace(hour=scheduled_time[0], minute=scheduled_time[1], second=0, microsecond=0)
+        if target <= now:
+            target += timedelta(days=1)
+        sleep_seconds = (target - now).total_seconds()
+        print("Scheduled daily at {:02d}:{:02d}".format(scheduled_time[0], scheduled_time[1]))
+        print("Next run in {:.1f} hours".format(sleep_seconds / 3600))
+        print("Press Ctrl+C to stop")
+        while True:
+            try:
+                time.sleep(sleep_seconds)
+                do_it(session, save_file, send_telegram, send_pastebin, pastebin_config)
+                sleep_seconds = 86400
+            except KeyboardInterrupt:
+                print("\nScheduler stopped.")
+                break
+            except Exception as e:
+                print("Error in scheduled run: {}".format(e))
+                time.sleep(60)
         session.logout()
 
 
@@ -262,7 +268,7 @@ def do_it(session, save_file=True, send_telegram=False, send_pastebin=False, pas
     path = "view=pirateFortress&cityId={}&position=17&activeTab=tabRanking&backgroundView=city&currentCityId={}&actionRequest={}&ajax=1".format(
         city_id, city_id, actionRequest
     )
-    html = session.get(path)
+    html = session.post(path)
     
     # Parse ranking data from the response
     ranking_data = parse_ranking(html)
@@ -349,7 +355,6 @@ def do_it(session, save_file=True, send_telegram=False, send_pastebin=False, pas
                 island
             ))
     else:
-        # Simplified error message (no HTML/JSON dump)
         report_lines.append("Ranking data is not available or could not be parsed.")
         if ranking_data and "error" in ranking_data:
             report_lines.append("Reason: {}".format(ranking_data["error"]))
@@ -468,10 +473,26 @@ def pastebin_create(api_dev_key, api_user_key, title, content, private=1):
     return resp.text.strip()
 
 
+def pastebin_delete(api_dev_key, api_user_key, paste_key):
+    """Delete a paste by its key."""
+    url = 'https://pastebin.com/api/api_post.php'
+    data = {
+        'api_dev_key': api_dev_key,
+        'api_user_key': api_user_key,
+        'api_option': 'delete',
+        'api_paste_key': paste_key,
+    }
+    resp = requests.post(url, data=data)
+    if resp.text.startswith('Bad API request'):
+        raise Exception("Pastebin delete failed: {}".format(resp.text))
+    return resp.text.strip()
+
+
 def pastebin_append_or_create(api_dev_key, api_user_key, title, new_content, private=1):
     """
     Append new_content to the existing paste matching `title`, or create a new one.
-    Returns the paste URL.
+    Deletes the old paste after successful creation.
+    Returns the new paste URL.
     """
     pastes = pastebin_list_pastes(api_dev_key, api_user_key)
 
@@ -489,7 +510,15 @@ def pastebin_append_or_create(api_dev_key, api_user_key, title, new_content, pri
         except Exception:
             pass
 
-    return pastebin_create(api_dev_key, api_user_key, title, full_content, private)
+    new_url = pastebin_create(api_dev_key, api_user_key, title, full_content, private)
+
+    if existing:
+        try:
+            pastebin_delete(api_dev_key, api_user_key, existing['key'])
+        except Exception:
+            pass
+
+    return new_url
 
 
 def parse_ranking_from_html(html):
@@ -514,7 +543,6 @@ def parse_ranking_from_html(html):
     ul_content = match.group(1)
     
     # Find all LI elements with their full tag (including attributes)
-    # Pattern to capture the entire LI tag with attributes and content
     li_full_pattern = r'<li([^>]*)>(.*?)</li>'
     li_matches = re.findall(li_full_pattern, ul_content, re.DOTALL)
     
@@ -531,7 +559,7 @@ def parse_ranking_from_html(html):
             continue
         
         # Extract points
-        points_match = re.search(r'<span class="pirateBooty"[^>]*>([\d\s]+?)\s*&nbsp;', li_content)
+        points_match = re.search(r'<span class="pirateBooty"[^>]*>([\d\s,]+?)\s*&nbsp;', li_content)
         if not points_match:
             continue
         
@@ -558,7 +586,7 @@ def parse_ranking_from_html(html):
         
         if pos_match and points_match:
             position = int(pos_match.group(1))
-            points_str = points_match.group(1).replace(' ', '').replace('\xa0', '').replace(' ', '')
+            points_str = points_match.group(1).replace(' ', '').replace('\xa0', '').replace('\u00a0', '').replace(',', '')
             try:
                 points = int(points_str)
                 entry = {
@@ -632,21 +660,59 @@ def parse_ranking(html):
         # The response is a JSON array like: [["updateGlobalData", {...}], ["changeView", ["pirateFortress", "<html>", ...]]]
         data = json.loads(html)
         
-        # Get the HTML from the response - it's in ["changeView"][1][1]
+        # Get the HTML from the response - try multiple strategies
         html_content = None
+        
+        # Strategy 1: look for ["changeView", ["pirateFortress", "<html>", ...]]
         for item in data:
-            if isinstance(item, list) and len(item) == 2:
-                if item[0] == "changeView" and isinstance(item[1], list) and len(item[1]) > 1:
-                    html_content = item[1][1] if isinstance(item[1][1], str) else None
-                    break
+            if isinstance(item, list) and len(item) >= 2:
+                if item[0] == "changeView":
+                    if isinstance(item[1], list) and len(item[1]) > 1:
+                        html_content = item[1][1] if isinstance(item[1][1], str) else None
+                        break
+                    # Try other positions
+                    for pos in range(1, len(item)):
+                        if isinstance(item[pos], str) and len(item[pos]) > 100:
+                            html_content = item[pos]
+                            break
+        
+        # Strategy 2: look for any item with "pirateFortress" or "pirateHighscore" in it
+        if not html_content:
+            for item in data:
+                if isinstance(item, list):
+                    for sub in item:
+                        if isinstance(sub, str) and ("pirateFortress" in sub or "pirateHighscore" in sub):
+                            html_content = sub
+                            break
+        
+        # Strategy 3: look for the longest string in the response
+        if not html_content:
+            candidates = []
+            def find_strings(obj, depth=0):
+                if depth > 5:
+                    return
+                if isinstance(obj, str) and len(obj) > 200:
+                    candidates.append(obj)
+                elif isinstance(obj, list):
+                    for item in obj:
+                        find_strings(item, depth+1)
+                elif isinstance(obj, dict):
+                    for v in obj.values():
+                        find_strings(v, depth+1)
+            find_strings(data)
+            if candidates:
+                candidates.sort(key=len, reverse=True)
+                html_content = candidates[0]
         
         if html_content:
             # Parse the HTML to extract ranking
             ranking = parse_ranking_from_html(html_content)
             if ranking:
                 return {"ranking": ranking}
-        
+
         # If we couldn't parse, return the raw HTML for debugging
         return {"error": "Could not parse ranking", "html_preview": html[:2000]}
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         return {"error": str(e), "raw": html[:2000]}
