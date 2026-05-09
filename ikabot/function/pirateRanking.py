@@ -1,13 +1,46 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+# =============================================================================
+# pirateRanking.py - Multi-Account Pastebin Architecture
+# =============================================================================
+# Multiple ikabot accounts share one Pastebin (registered) account to post
+# ranking reports to a single paste. All accounts use the same paste title
+# to locate and append to the same document.
+#
+# Flow per account:
+#   1. Generate ranking report
+#   2. Login to Pastebin (api_login.php) with shared credentials
+#   3. List pastes by title, find the latest one
+#   4. Fetch raw content of existing paste
+#   5. Append new report content at the end
+#   6. Create NEW paste with combined content and SAME title
+#      (Pastebin API does not support editing; a new paste is created)
+#   7. If configured (send_pastebin_telegram=True), send the new paste URL
+#      to Telegram so the last account broadcasts the final link
+#
+# Scheduling:
+#   Accounts should be staggered 5+ minutes apart to avoid race conditions
+#   when reading/updating the shared paste.
+#   Example: 18:00, 18:05, 18:10, 18:15, ...
+#
+# Configuration per account:
+#   pastebin_dev_key        API developer key (get it at https://pastebin.com/doc_api)
+#   pastebin_user_name      Pastebin account username (shared across instances)
+#   pastebin_user_key       User API key (get via api_login.php, never expires)
+#   paste_title             Fixed title used to identify the shared paste
+#   send_pastebin_telegram  True only for the last/stagger account to broadcast URL
+# =============================================================================
+
 import re
 import sys
 import json
 import os
 import random
 import time
-from datetime import datetime
+import requests
+import xml.etree.ElementTree as ET
+from datetime import datetime, timedelta
 
 from ikabot.config import *
 from ikabot.helpers.getJson import *
@@ -15,6 +48,15 @@ from ikabot.helpers.gui import *
 from ikabot.helpers.pedirInfo import getIdsOfCities, read, enter
 from ikabot.helpers.process import run, set_child_mode
 from ikabot.helpers.botComm import sendToBot, checkTelegramData
+
+
+def get_saved_pastebin_config(session):
+    """Load saved Pastebin config from session data, or return None."""
+    try:
+        sessionData = session.getSessionData()
+        return sessionData["shared"].get("pastebin")
+    except Exception:
+        return None
 
 
 def pirateRanking(session, event, stdin_fd, predetermined_input):
@@ -35,11 +77,11 @@ def pirateRanking(session, event, stdin_fd, predetermined_input):
         print("Output options:")
         print("(1) Save to file only")
         print("(2) Send to Telegram")
-        print("(3) Send to Pastebin (TODO)")
+        print("(3) Send to Pastebin")
         print("(4) File + Telegram")
-        print("(5) File + Pastebin (TODO)")
-        print("(6) Telegram + Pastebin (TODO)")
-        print("(7) All (File + Telegram + Pastebin) (TODO)")
+        print("(5) File + Pastebin")
+        print("(6) Telegram + Pastebin")
+        print("(7) All (File + Telegram + Pastebin)")
         output_option = read(min=1, max=7, digit=True)
 
         send_telegram = output_option in [2, 4, 6, 7]
@@ -58,15 +100,83 @@ def pirateRanking(session, event, stdin_fd, predetermined_input):
         send_pastebin = output_option in [3, 5, 6, 7]
         save_file = output_option in [1, 4, 5, 7]
 
+        pastebin_config = None
+        if send_pastebin:
+            saved = get_saved_pastebin_config(session)
+            if saved:
+                print("Pastebin configuration loaded from saved data.")
+                pastebin_config = saved
+            else:
+                print("\n--- Pastebin Configuration ---")
+                print("Get your API developer key at: https://pastebin.com/doc_api (login required)")
+                print("Pastebin Developer API Key:")
+                pastebin_dev_key = read()
+                print("\nAPI User Key options:")
+                print("(1) Use existing api_user_key (recommended)")
+                print("(2) Generate new api_user_key (one-time setup with user/pass)")
+                key_option = read(min=1, max=2, digit=True)
+                if key_option == 1:
+                    print("Pastebin User Key (does not expire):")
+                    pastebin_user_key = read()
+                    if not pastebin_user_key:
+                        print("No key entered. Switching to generate mode...")
+                        key_option = 2
+                if key_option == 2:
+                    print("Pastebin username:")
+                    pastebin_user_name = read()
+                    print("Pastebin password (will be visible):")
+                    pastebin_user_password = read()
+                    print("Logging in to Pastebin...")
+                    try:
+                        pastebin_user_key = pastebin_login(pastebin_dev_key, pastebin_user_name, pastebin_user_password)
+                        print("Generated api_user_key: {}".format(pastebin_user_key))
+                        print("Save this key for future use (does not expire).")
+                    except Exception as e:
+                        print("Login failed: {}".format(e))
+                        pastebin_user_key = None
+                if pastebin_user_key:
+                    print("Paste title (e.g. 'Pirate Fortress Ranking'):")
+                    paste_title = read()
+                    print("\nPaste visibility:")
+                    print("(0) Public - anyone can find it on Pastebin archive")
+                    print("(1) Unlisted - anyone with the link can view (default)")
+                    print("(2) Private - only logged in to the Pastebin account can view")
+                    paste_private = read(min=0, max=2, digit=True)
+                    print("Send final paste URL to Telegram after update? (y/n)")
+                    send_pastebin_telegram = read().lower() == 'y'
+                    pastebin_config = {
+                        'dev_key': pastebin_dev_key,
+                        'user_key': pastebin_user_key,
+                        'title': paste_title,
+                        'private': paste_private,
+                        'send_telegram': send_pastebin_telegram,
+                    }
+                    session.setSessionData({"pastebin": pastebin_config}, shared=True)
+                    print("Pastebin configuration saved.")
+                else:
+                    print("Pastebin configuration failed. Disabling Pastebin output.")
+
         print("\nExecution options:")
         print("(1) Run ranking now")
-        print("(2) Schedule ranking every X hours")
+        print("(2) Schedule daily at HH:MM (24h format)")
         execution_option = read(min=1, max=2, digit=True)
 
-        interval_hours = None
+        scheduled_time = None
         if execution_option == 2:
-            print("\nRun every how many hours? (minimum 1)")
-            interval_hours = read(min=1, digit=True)
+            print("\nEnter time to run daily (HH:MM, 24h format, e.g. 18:00):")
+            while True:
+                time_str = read()
+                try:
+                    parts = time_str.split(':')
+                    hour = int(parts[0])
+                    minute = int(parts[1])
+                    if 0 <= hour <= 23 and 0 <= minute <= 59:
+                        scheduled_time = (hour, minute)
+                        break
+                    else:
+                        print("Invalid time. Use HH:MM format (e.g. 18:00)")
+                except (ValueError, IndexError):
+                    print("Invalid format. Use HH:MM (e.g. 18:00)")
 
         print("\n=== Configuration Summary ===")
         print("Output: ", end="")
@@ -76,12 +186,14 @@ def pirateRanking(session, event, stdin_fd, predetermined_input):
         if send_telegram:
             outputs.append("Telegram")
         if send_pastebin:
-            outputs.append("Pastebin (TODO)")
+            outputs.append("Pastebin")
         print(", ".join(outputs))
+        if send_pastebin:
+            print("Pastebin title: {}".format(pastebin_config['title']))
         if execution_option == 1:
             print("Execution: Run once now")
         else:
-            print("Execution: Every {} hour(s)".format(interval_hours))
+            print("Execution: Daily at {:02d}:{:02d}".format(scheduled_time[0], scheduled_time[1]))
         print("=" * 30 + "\n")
 
         enter()
@@ -90,15 +202,21 @@ def pirateRanking(session, event, stdin_fd, predetermined_input):
         event.set()
 
         if execution_option == 1:
-            do_it(session, save_file, send_telegram, send_pastebin)
+            do_it(session, save_file, send_telegram, send_pastebin, pastebin_config)
         else:
-            print("Scheduling pirate ranking every {} hour(s)".format(interval_hours))
+            now = datetime.now()
+            target = now.replace(hour=scheduled_time[0], minute=scheduled_time[1], second=0, microsecond=0)
+            if target <= now:
+                target += timedelta(days=1)
+            sleep_seconds = (target - now).total_seconds()
+            print("Scheduled daily at {:02d}:{:02d}".format(scheduled_time[0], scheduled_time[1]))
+            print("Next run in {:.1f} hours".format(sleep_seconds / 3600))
             print("Press Ctrl+C to stop")
             while True:
                 try:
-                    do_it(session, save_file, send_telegram, send_pastebin)
-                    print("\nWaiting {} hour(s) for next run...".format(interval_hours))
-                    time.sleep(interval_hours * 3600)
+                    time.sleep(sleep_seconds)
+                    do_it(session, save_file, send_telegram, send_pastebin, pastebin_config)
+                    sleep_seconds = 86400
                 except KeyboardInterrupt:
                     print("\nScheduler stopped.")
                     break
@@ -115,7 +233,7 @@ def pirateRanking(session, event, stdin_fd, predetermined_input):
         session.logout()
 
 
-def do_it(session, save_file=True, send_telegram=False, send_pastebin=False):
+def do_it(session, save_file=True, send_telegram=False, send_pastebin=False, pastebin_config=None):
     # Get all cities
     cities_ids = getIdsOfCities(session)[0]
     
@@ -254,11 +372,124 @@ def do_it(session, save_file=True, send_telegram=False, send_pastebin=False):
         except Exception as e:
             print("Error sending to Telegram: {}".format(e))
     
-    # Send to Pastebin (TODO)
-    if send_pastebin:
-        print("Pastebin support not implemented yet")
+    # Send to Pastebin
+    if send_pastebin and pastebin_config:
+        try:
+            paste_url = pastebin_append_or_create(
+                pastebin_config['dev_key'],
+                pastebin_config['user_key'],
+                pastebin_config['title'],
+                report_content,
+                pastebin_config['private'],
+            )
+            print("Pastebin updated: {}".format(paste_url))
+            if pastebin_config['send_telegram']:
+                sendToBot(session, "Pirate Ranking updated on Pastebin: {}".format(paste_url))
+        except Exception as e:
+            print("Error sending to Pastebin: {}".format(e))
     
     print("Ranking update completed.")
+
+
+# =============================================================================
+# Pastebin API helpers
+# =============================================================================
+
+def pastebin_login(api_dev_key, api_user_name, api_user_password):
+    """Login to Pastebin and return api_user_key."""
+    url = 'https://pastebin.com/api/api_login.php'
+    data = {
+        'api_dev_key': api_dev_key,
+        'api_user_name': api_user_name,
+        'api_user_password': api_user_password,
+    }
+    resp = requests.post(url, data=data)
+    if resp.text.startswith('Bad API request'):
+        raise Exception("Pastebin login failed: {}".format(resp.text))
+    return resp.text.strip()
+
+
+def pastebin_list_pastes(api_dev_key, api_user_key):
+    """List pastes for a Pastebin user, returns list of dicts sorted by date desc."""
+    url = 'https://pastebin.com/api/api_post.php'
+    data = {
+        'api_dev_key': api_dev_key,
+        'api_user_key': api_user_key,
+        'api_option': 'list',
+        'api_results_limit': 100,
+    }
+    resp = requests.post(url, data=data)
+    if resp.text.startswith('Bad API request') or resp.text.startswith('No pastes found'):
+        return []
+    root = ET.fromstring('<pastes>' + resp.text + '</pastes>')
+    pastes = []
+    for paste_elem in root.findall('paste'):
+        pastes.append({
+            'key': paste_elem.findtext('paste_key', ''),
+            'title': paste_elem.findtext('paste_title', ''),
+            'date': int(paste_elem.findtext('paste_date', '0')),
+            'url': paste_elem.findtext('paste_url', ''),
+        })
+    pastes.sort(key=lambda p: p['date'], reverse=True)
+    return pastes
+
+
+def pastebin_fetch_raw(api_dev_key, api_user_key, paste_key):
+    """Fetch raw content of a paste by its key using the authenticated API (works for private pastes too)."""
+    url = 'https://pastebin.com/api/api_raw.php'
+    data = {
+        'api_dev_key': api_dev_key,
+        'api_user_key': api_user_key,
+        'api_option': 'show_paste',
+        'api_paste_key': paste_key,
+    }
+    resp = requests.post(url, data=data)
+    if resp.text.startswith('Bad API request'):
+        raise Exception("Pastebin fetch failed: {}".format(resp.text))
+    return resp.text
+
+
+def pastebin_create(api_dev_key, api_user_key, title, content, private=1):
+    """Create a new paste, returns the paste URL."""
+    url = 'https://pastebin.com/api/api_post.php'
+    data = {
+        'api_dev_key': api_dev_key,
+        'api_user_key': api_user_key,
+        'api_option': 'paste',
+        'api_paste_code': content,
+        'api_paste_name': title,
+        'api_paste_private': str(private),
+        'api_paste_expire_date': 'N',
+        'api_paste_format': 'text',
+    }
+    resp = requests.post(url, data=data)
+    if resp.text.startswith('Bad API request'):
+        raise Exception("Pastebin create failed: {}".format(resp.text))
+    return resp.text.strip()
+
+
+def pastebin_append_or_create(api_dev_key, api_user_key, title, new_content, private=1):
+    """
+    Append new_content to the existing paste matching `title`, or create a new one.
+    Returns the paste URL.
+    """
+    pastes = pastebin_list_pastes(api_dev_key, api_user_key)
+
+    existing = None
+    for p in pastes:
+        if p['title'] == title:
+            existing = p
+            break
+
+    full_content = new_content
+    if existing:
+        try:
+            old_content = pastebin_fetch_raw(api_dev_key, api_user_key, existing['key'])
+            full_content = old_content.rstrip('\n') + '\n\n--- New Report ---\n\n' + new_content
+        except Exception:
+            pass
+
+    return pastebin_create(api_dev_key, api_user_key, title, full_content, private)
 
 
 def parse_ranking_from_html(html):
