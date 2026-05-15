@@ -60,10 +60,8 @@ def _force_origin_city_context(session, origin_city_id):
     Force server-side current city to origin before any wave/selection request.
     """
     try:
-        session.get(
-            f"view=city&cityId={origin_city_id}&currentCityId={origin_city_id}",
-            noIndex=True
-        )
+        #session.get(f"view=city&cityId={origin_city_id}&currentCityId={origin_city_id}",noIndex=True)
+        session.get(f"view=city&cityId={origin_city_id}", noIndex=True)
     except Exception:
         pass
 
@@ -76,7 +74,7 @@ def get_units(session, city):
         resp_text = session.post(params=params) # 
         resp = json.loads(resp_text, strict=False) # 
         
-        # Detectamos el tipo de relación con la ciudad (propia, ocupada o desplegada) 
+        # Detectamos el tipo de relaciÃ³n con la ciudad (propia, ocupada o desplegada) 
         server_rel = "ownCity"
         for update in resp:
             if update[0] == "updateGlobalData":
@@ -86,7 +84,7 @@ def get_units(session, city):
         is_special_view = server_rel in ['occupiedCities', 'deployedCities'] # 
         html = ""
         
-        # Si es una ciudad ocupada o de la alianza, la info está en relatedCities [cite: 8, 16]
+        # Si es una ciudad ocupada o de la alianza, la info estÃ¡ en relatedCities [cite: 8, 16]
         if is_special_view:
             params["view"] = "relatedCities" # [cite: 16]
             resp_text = session.post(params=params) # [cite: 8]
@@ -103,8 +101,8 @@ def get_units(session, city):
         units = {}
 
         if is_special_view:
-            # --- Lógica para ciudades Aliadas u Ocupadas --- [cite: 51]
-            # Aislamos la sección de nuestras tropas en el HTML ajeno [cite: 51]
+            # --- LÃ³gica para ciudades Aliadas u Ocupadas --- [cite: 51]
+            # Aislamos la secciÃ³n de nuestras tropas en el HTML ajeno [cite: 51]
             parts = html.split('class="contentBox01h"')
             if len(parts) > 1:
                 html = parts[1] # [cite: 51]
@@ -118,7 +116,7 @@ def get_units(session, city):
                 'cook': '310', 'medic': '311', 'spartan': '319'
             }
             
-            # Buscamos los botones de ejército: clase y cantidad 
+            # Buscamos los botones de ejÃ©rcito: clase y cantidad 
             found = re.findall(r'class="armybutton (\w+)">\s*([\d\u00a0,.-]+)\s*</div>', html)
             for u_class, u_amount in found:
                 u_id = mapping.get(u_class)
@@ -129,7 +127,7 @@ def get_units(session, city):
                     if amount > 0:
                         units[u_id] = {"name": u_class.capitalize(), "amount": amount}
         else:
-            # --- Lógica para Ciudades Propias --- [cite: 32]
+            # --- LÃ³gica para Ciudades Propias --- [cite: 32]
             html_units = html.split('<div class="fleet')[0] # 
             tables = re.findall(r'<table[^>]*class="[^"]*militaryList[^"]*"[^>]*>(.*?)</table>', html_units, re.DOTALL) # 
             
@@ -137,7 +135,7 @@ def get_units(session, city):
                 ids = re.findall(r'class="army (s\d+)"', table_html) # 
                 names = re.findall(r'<div class="tooltip">([^<]+)</div>', table_html) # 
                 
-                # Buscamos los números en la fila 'count' 
+                # Buscamos los nÃºmeros en la fila 'count' 
                 amounts_row = re.search(r'<tr class="count">.*?<td>.*?</td>(.*?)</tr>', table_html, re.DOTALL) # 
                 if not amounts_row:
                     continue
@@ -323,17 +321,41 @@ def AttackPlayer(session, event, stdin_fd, predetermined_input):
             enter()
             return
 
+        # Diccionario de traducciÃ³n de IDs a nombres para la interfaz
+        unit_names_map = {
+            '301': 'Hondero', '302': 'EspadachÃ­n', '303': 'Hoplita',
+            '304': 'Fusilero', '305': 'Mortero', '306': 'Catapulta',
+            '307': 'Ariete', '308': 'Gigante a Vapor', '309': 'GirocÃ³ptero',
+            '310': 'Cocinero', '311': 'MÃ©dico', '312': 'Bombardero',
+            '313': 'Arquero', '314': 'Lancero', '315': 'Lancero', '316': 'Spartan'
+        }
+        
         banner()
         print(f"Planning attack from {decodeUnicodeEscape(origin_city['name'])}")
 
         selected_units_payload = {}
-        for unit_id, unit_data in sorted(units_in_origin.items()):
-            unit_name = unit_data['name']
-            max_amount = unit_data['amount']
+        #for unit_id, unit_data in sorted(units_in_origin.items()):
+        #    unit_name = unit_data['name']
+        #    max_amount = unit_data['amount']
+        #    amount_to_send = int(read(
+        #        msg=f"  Send {unit_name} (available: {addThousandSeparator(max_amount)}): ",
+        #        #min=0, max=max_amount, default=0
+        #        min=0, max=999, default=0
+        #    ))
+        # Definimos todas las unidades posibles para que aparezcan aunque no haya stock
+        # Usamos UNIT_UPKEEP.keys() que contiene los IDs de las tropas terrestres [cite: 19, 21]
+        for unit_id in sorted(UNIT_UPKEEP.keys()):
+            # Obtenemos la info actual de la ciudad si existe [cite: 532]
+            unit_info = units_in_origin.get(unit_id, {'amount': 0})
+            
+            # Priorizamos el nombre del mapa de traducciÃ³n, si no, usamos el ID [cite: 324]
+            display_name = unit_names_map.get(unit_id, f"Unit {unit_id}")
+            current_amount = unit_info['amount']
+            
+            # Mostramos el nombre descriptivo en el prompt
             amount_to_send = int(read(
-                msg=f"  Send {unit_name} (available: {addThousandSeparator(max_amount)}): ",
-                #min=0, max=max_amount, default=0
-                min=0, max=999, default=0
+                msg=f"  Send {display_name} (available: {addThousandSeparator(current_amount)}): ",
+                min=0, max=9999, default=0 
             ))
             if amount_to_send > 0:
                 selected_units_payload[unit_id] = amount_to_send
@@ -428,6 +450,7 @@ def AttackPlayer(session, event, stdin_fd, predetermined_input):
             wave_number = i + 1
             attack_log(f"WAVE {wave_number}/{number_of_waves} started")
 
+            # 1. VerificaciÃ³n del estado de la ciudad objetivo antes de lanzar la ola
             if wave_number > 1:
                 state_city = _get_city_state(session, target_city)
                 if state_city is not None and not _is_inactive_grey(state_city):
@@ -445,14 +468,21 @@ def AttackPlayer(session, event, stdin_fd, predetermined_input):
                     attack_log(msg_stop, level="WARN")
                     break
 
+            # 2. ESPERA DE BARCOS: Siempre los esperamos antes de atacar, ya que incluso en 
+            # la misma isla son necesarios para cargar el botÃ­n de regreso.
+            _wait_until_ships_full(session, origin_city["id"], ATTACK_SHIPS)
+
+            # 3. RE-FORZAR CONTEXTO: Lo hacemos inmediatamente despuÃ©s de la espera para limpiar 
+            # cualquier cambio de ciudad que haya ocurrido en segundo plano durante el tiempo de espera.
             _force_origin_city_context(session, origin_city["id"])
 
-            if attack_function != 'plunder':
-                _wait_until_ships_full(session, origin_city["id"], ATTACK_SHIPS)
-            # FORZAR CIUDAD SOLO ACA
-            _force_origin_city_context(session, origin_city["id"])
-
+            # 4. PREPARACIÃ“N DEL PAYLOAD CON BLINDAJE:
+            # Aseguramos que los IDs de ciudad sean explÃ­citos en el payload final.
             payload = dict(payload_base)
+            payload["cityId"] = str(origin_city['id'])
+            payload["currentCityId"] = str(origin_city['id'])
+
+            # 5. ENVÃO DEL ATAQUE
             response_data = session.post(params=payload)
             response_json = json.loads(response_data, strict=False)
 
