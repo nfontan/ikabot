@@ -325,10 +325,11 @@ def AttackPlayer(session, event, stdin_fd, predetermined_input):
         _force_origin_city_context(session, origin_city["id"])
 
         units_in_origin = get_units(session, origin_city)
-        if not units_in_origin:
-            print(f"You don't have any land troops in {decodeUnicodeEscape(origin_city['name'])}!")
-            enter()
-            return
+        #Para planificar ataques
+        #if not units_in_origin:
+        #    print(f"You don't have any land troops in {decodeUnicodeEscape(origin_city['name'])}!")
+        #    enter()
+        #    return
 
         # Diccionario de traducción de IDs a nombres para la interfaz
         unit_names_map = {
@@ -401,6 +402,14 @@ def AttackPlayer(session, event, stdin_fd, predetermined_input):
             min=1, default=1
         )
 
+        # Delay entre ataques
+        base_delay_minutes = 0
+        if number_of_waves > 1:
+            base_delay_minutes = read(
+                msg="\nEnter base wait time between waves in MINUTES: ",
+                min=0, default=0
+            )
+
         if not read_yes_no("\nProceed with this attack plan?"):
             print("Attack aborted.")
             return
@@ -462,39 +471,31 @@ def AttackPlayer(session, event, stdin_fd, predetermined_input):
             wave_number = i + 1
             attack_log(f"WAVE {wave_number}/{number_of_waves} started")
 
-            # 1. Verificación del estado de la ciudad objetivo antes de lanzar la ola
+            # 1. Verificación de estado del objetivo (Activación o Vacaciones)
             if wave_number > 1:
                 state_city = _get_city_state(session, target_city)
-                if state_city is not None and not _is_inactive_grey(state_city):
-                    msg_stop = (
-                        f"Attack stopped before wave {wave_number}. "
-                        f"Target city {decodeUnicodeEscape(target_city['name'])} "
-                        f"({decodeUnicodeEscape(target_city['ownerName'])}) is no longer inactive "
-                        f"(state={state_city})."
-                    )
-                    try:
-                        if send_notifications:
-                            sendToBot(session, msg_stop)
-                    except Exception:
-                        pass
+                is_vacation = state_city == "vacation"
+                is_no_longer_inactive = state_city is not None and not _is_inactive_grey(state_city)
+
+                if is_vacation or is_no_longer_inactive:
+                    razon = "entró en MODO VACACIONES" if is_vacation else f"ya NO es inactiva (estado: {state_city})"
+                    msg_stop = f"Ataque DETENIDO antes de la ola {wave_number}. La ciudad {decodeUnicodeEscape(target_city['name'])} {razon}."
                     attack_log(msg_stop, level="WARN")
+                    if send_notifications:
+                        sendToBot(session, msg_stop)
                     break
 
-            # 2. ESPERA DE BARCOS: Siempre los esperamos antes de atacar, ya que incluso en 
-            # la misma isla son necesarios para cargar el botín de regreso.
+            # 2. ESPERA DE BARCOS: Esencial para poder cargar recursos en cualquier caso
             _wait_until_ships_full(session, origin_city["id"], ATTACK_SHIPS)
 
-            # 3. RE-FORZAR CONTEXTO: Lo hacemos inmediatamente después de la espera para limpiar 
-            # cualquier cambio de ciudad que haya ocurrido en segundo plano durante el tiempo de espera.
+            # 3. RE-FORZAR CONTEXTO Y BLINDAJE DE PAYLOAD:
+            # Forzamos justo antes del envío para evitar "suciedad" en la sesión
             _force_origin_city_context(session, origin_city["id"])
-
-            # 4. PREPARACIÓN DEL PAYLOAD CON BLINDAJE:
-            # Aseguramos que los IDs de ciudad sean explícitos en el payload final.
             payload = dict(payload_base)
             payload["cityId"] = str(origin_city['id'])
             payload["currentCityId"] = str(origin_city['id'])
 
-            # 5. ENVÍO DEL ATAQUE
+            # 4. ENVÍO DEL ATAQUE (Sin validación previa de tropas para permitir planificación)
             response_data = session.post(params=payload)
             response_json = json.loads(response_data, strict=False)
 
@@ -506,36 +507,38 @@ def AttackPlayer(session, event, stdin_fd, predetermined_input):
                     success = False
                     break
 
-            attack_log(
-                f"WAVE {wave_number}: status={'SUCCESS' if success else 'FAILED'} "
-                f"server_msg={server_msg!r}"
-            )
+            attack_log(f"WAVE {wave_number}: status={'SUCCESS' if success else 'FAILED'} server_msg={server_msg!r}")
 
-            try:
-                status_text = "Success" if success else f"Failed ({server_msg})"
-                delay_info = f"{last_delay} seconds" if wave_number > 1 else "N/A"
-                session.setStatus(f"Attack wave {wave_number} of {number_of_waves}")
+            # --- 5. GESTION DE ESPERAS POST-ATAQUE ---
+            if success and wave_number < number_of_waves:
+                # Paso A: Esperar que los barcos regresen antes de iniciar el delay humano
+                session.setStatus(f"Ola {wave_number} enviada. Esperando regreso de barcos...")
+                _wait_until_ships_full(session, origin_city["id"], ATTACK_SHIPS)
+
+                # Paso B: Calcular delay humano (Base + 1 a 3 min random)
+                extra_random_minutes = random.randint(1, 3)
+                total_wait_minutes = int(base_delay_minutes) + extra_random_minutes
+                
+                attack_log(f"Barcos en puerto. Iniciando espera de {total_wait_minutes} min.")
+                
                 if send_notifications:
-                    sendToBot(
-                        session,
-                        (
-                            f"Attack wave {wave_number} of {number_of_waves}\n"
-                            f"Origin city: {decodeUnicodeEscape(origin_city['name'])}\n"
-                            f"Target city: {decodeUnicodeEscape(target_city['name'])}\n"
-                            f"Units sent: {sum(selected_units_payload.values())}\n"
-                            f"Ships used: {ATTACK_SHIPS}\n"
-                            f"Wave status: {status_text}\n"
-                            f"Delay before this wave: {delay_info}"
-                        )
-                    )
-            except Exception:
-                pass
+                    sendToBot(session, f"Ola {wave_number} exitosa. Barcos de regreso. Esperando {total_wait_minutes} min para la siguiente.")
 
-            if wave_number < number_of_waves:
-                last_delay = random.randint(1, 20)
-                wait(last_delay)
+                # Paso C: Bucle de cuenta regresiva para actualizar el Status de Ikabot
+                for remaining in range(total_wait_minutes, 0, -1):
+                    session.setStatus(f"Barcos de regreso. Próxima ola en: {remaining} min)")
+                    # Esperamos 60 segundos antes de descontar el siguiente minuto
+                    wait(60)
+                
+                attack_log(f"Espera humana completada. Iniciando WAVE {wave_number + 1}")
+            
+            elif success and wave_number == number_of_waves:
+                session.setStatus(f"Misión finalizada. {number_of_waves} olas enviadas.")
+                if send_notifications:
+                    sendToBot(session, f"Misión de ataque completada con éxito.")
 
             if not success:
+                # Si el servidor rechaza el ataque (por ejemplo, tropas realmente no llegaron a tiempo)
                 break
 
         attack_log("END AttackPlayer: all waves dispatched")
