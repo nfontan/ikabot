@@ -467,6 +467,7 @@ def AttackPlayer(session, event, stdin_fd, predetermined_input):
 
         last_delay = 0
 
+        # --- BUCLE DE OLEADAS ---
         for i in range(number_of_waves):
             wave_number = i + 1
             attack_log(f"WAVE {wave_number}/{number_of_waves} started")
@@ -485,17 +486,16 @@ def AttackPlayer(session, event, stdin_fd, predetermined_input):
                         sendToBot(session, msg_stop)
                     break
 
-            # 2. ESPERA DE BARCOS: Esencial para poder cargar recursos en cualquier caso
+            # 2. ESPERA DE BARCOS PRE-ATAQUE (Para asegurar disponibilidad)
             _wait_until_ships_full(session, origin_city["id"], ATTACK_SHIPS)
 
-            # 3. RE-FORZAR CONTEXTO Y BLINDAJE DE PAYLOAD:
-            # Forzamos justo antes del envío para evitar "suciedad" en la sesión
+            # 3. RE-FORZAR CONTEXTO Y BLINDAJE DE PAYLOAD
             _force_origin_city_context(session, origin_city["id"])
             payload = dict(payload_base)
             payload["cityId"] = str(origin_city['id'])
             payload["currentCityId"] = str(origin_city['id'])
 
-            # 4. ENVÍO DEL ATAQUE (Sin validación previa de tropas para permitir planificación)
+            # 4. ENVÍO DEL ATAQUE
             response_data = session.post(params=payload)
             response_json = json.loads(response_data, strict=False)
 
@@ -507,38 +507,36 @@ def AttackPlayer(session, event, stdin_fd, predetermined_input):
                     success = False
                     break
 
-            attack_log(f"WAVE {wave_number}: status={'SUCCESS' if success else 'FAILED'} server_msg={server_msg!r}")
+            attack_log(f"WAVE {wave_number}/{number_of_waves}: status={'SUCCESS' if success else 'FAILED'} server_msg={server_msg!r}")
 
-            # --- 5. GESTION DE ESPERAS POST-ATAQUE ---
+            # 5. GESTIÓN DE ESPERAS POST-ATAQUE (Simulación Humana con Reloj Dinámico)
             if success and wave_number < number_of_waves:
-                # Paso A: Esperar que los barcos regresen antes de iniciar el delay humano
-                session.setStatus(f"Ola {wave_number} enviada. Esperando regreso de barcos...")
+                # Actualización: Ahora indica "X de Y" oleadas
+                session.setStatus(f"Ola {wave_number}/{number_of_waves} enviada. Esperando regreso de barcos...")
                 _wait_until_ships_full(session, origin_city["id"], ATTACK_SHIPS)
 
-                # Paso B: Calcular delay humano (Base + 1 a 3 min random)
+                # Calcular delay humano (Base + 1 a 3 min random)
                 extra_random_minutes = random.randint(1, 3)
                 total_wait_minutes = int(base_delay_minutes) + extra_random_minutes
                 
-                attack_log(f"Barcos en puerto. Iniciando espera de {total_wait_minutes} min.")
+                attack_log(f"Barcos en puerto tras ola {wave_number}. Espera de {total_wait_minutes} min iniciada.")
                 
                 if send_notifications:
-                    sendToBot(session, f"Ola {wave_number} exitosa. Barcos de regreso. Esperando {total_wait_minutes} min para la siguiente.")
+                    sendToBot(session, f"Ola {wave_number}/{number_of_waves} exitosa. Barcos de regreso. Esperando {total_wait_minutes} min para la siguiente.")
 
-                # Paso C: Bucle de cuenta regresiva para actualizar el Status de Ikabot
+                # Bucle de cuenta regresiva con contador "X de Y"
                 for remaining in range(total_wait_minutes, 0, -1):
-                    session.setStatus(f"Barcos de regreso. Próxima ola en: {remaining} min)")
-                    # Esperamos 60 segundos antes de descontar el siguiente minuto
+                    session.setStatus(f"Ola {wave_number}/{number_of_waves} - Próxima en: {remaining} min (simulación humana)")
                     wait(60)
                 
-                attack_log(f"Espera humana completada. Iniciando WAVE {wave_number + 1}")
+                attack_log(f"Espera completada. Iniciando WAVE {wave_number + 1}")
             
             elif success and wave_number == number_of_waves:
-                session.setStatus(f"Misión finalizada. {number_of_waves} olas enviadas.")
+                session.setStatus(f"Misión finalizada. {number_of_waves}/{number_of_waves} olas enviadas.")
                 if send_notifications:
-                    sendToBot(session, f"Misión de ataque completada con éxito.")
+                    sendToBot(session, f"Misión de ataque completada: {number_of_waves} olas enviadas.")
 
             if not success:
-                # Si el servidor rechaza el ataque (por ejemplo, tropas realmente no llegaron a tiempo)
                 break
 
         attack_log("END AttackPlayer: all waves dispatched")
