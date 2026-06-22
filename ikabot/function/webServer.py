@@ -404,7 +404,7 @@ def webServer(session, event, stdin_fd, predetermined_input, port=None):
         # Ignore Ctrl+C 
         signal.signal(signal.SIGINT, signal.SIG_IGN)
         session.setStatus(
-            f"""running on http://127.0.0.1:{port} {'and '+'http://' + str(local_network_ip) + ':' + port if local_network_ip else ''}"""
+            f"""SISIrunning on http://127.0.0.1:{port} {'and '+'http://' + str(local_network_ip) + ':' + port if local_network_ip else ''}"""
         )
         event.set()
         
