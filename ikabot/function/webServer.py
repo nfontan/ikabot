@@ -322,49 +322,50 @@ def webServer(session, event, stdin_fd, predetermined_input, port=None):
         # --- GLOBAL IP DETECTION (Multiplatform / Docker / WSL / Host) ---
         local_network_ip = None
         
-        # 1. Case: Docker Desktop (Windows/macOS)
-        try:
-            local_network_ip = socket.gethostbyname("host.docker.internal")
-            # If Docker Desktop on WSL resolves to the internal 192.x or 172.x bridge VM ip,
-            # we discard it to allow the fallback mechanism to find the actual host interface.
-            if local_network_ip.startswith("172.") or local_network_ip.startswith("192.168.65."):
-                local_network_ip = None
-        except socket.gaierror:
-            pass
-
-        # 2. Case: WSL2 / Docker on WSL2 Hybrid Environment
-        # If we are inside WSL/Docker and still don't have the external Host IP,
-        # we can fetch the actual Windows Host bridge IP from the nameserver or routing tables.
-        if not local_network_ip and os.path.exists("/proc/net/route"):
+        # 1. Case: Hybrid WSL2 / Docker Desktop Environment (Windows Host via WSL)
+        # Check if we are running inside WSL or a Docker container backed by WSL.
+        # We can safely execute powershell.exe to query the actual Windows Host physical IP.
+        if os.path.exists("/proc/sys/fs/binfmt_misc/WSL2") or os.path.exists("/.dockerenv"):
             try:
-                # First try: Extract Windows Host IP via WSL default nameserver configuration
-                if os.path.exists("/etc/resolv.conf"):
-                    with open("/etc/resolv.conf", "r") as f:
-                        for line in f:
-                            if "nameserver" in line:
-                                ip = line.split()[1]
-                                # Discard local loopbacks and common docker internal bridges
-                                if not ip.startswith("127.") and not ip.startswith("172."):
-                                    local_network_ip = ip
-                                    break
-                
-                # Second try: Fallback to the default container bridge gateway if not solved
-                if not local_network_ip:
-                    with open("/proc/net/route", "r") as f:
-                        lines = f.readlines()
-                        for line in lines[1:]:
-                            parts = line.split()
-                            if parts[1] == '00000000':
-                                hex_gw = parts[2]
-                                gateway_ip = socket.inet_ntoa(bytes.fromhex(hex_gw)[::-1])
-                                # Ensure we don't just echo back the internal docker bridge loop
-                                if not gateway_ip.startswith("172.17."):
-                                    local_network_ip = gateway_ip
-                                    break
+                import subprocess
+                # Query the Windows Host routing table for the route to internet, extracting the local source IP
+                cmd = "powershell.exe -Command \"(Find-NetRoute -RemoteIPAddress 8.8.8.8).IPAddress.IPAddress\""
+                # Run the command silently
+                proc = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                stdout, _ = proc.communicate()
+                out_ip = stdout.decode().strip()
+                # Verify we got a valid, useful IP address (not loopback or docker internal network)
+                if out_ip and not out_ip.startswith("172.") and not out_ip.startswith("10.255."):
+                    local_network_ip = out_ip
             except:
                 pass
 
-        # 3. General Case: Physical Server, VPS, WSL native, or Docker in Host Mode
+        # 2. Case: Standard Docker Desktop (Windows/macOS fallback)
+        if not local_network_ip:
+            try:
+                local_network_ip = socket.gethostbyname("host.docker.internal")
+                if local_network_ip.startswith("172.") or local_network_ip.startswith("10.255."):
+                    local_network_ip = None
+            except socket.gaierror:
+                pass
+
+        # 3. Case: Native Docker on Linux/VPS (Bridge Mode Gateway)
+        if not local_network_ip and os.path.exists("/proc/net/route"):
+            try:
+                with open("/proc/net/route", "r") as f:
+                    lines = f.readlines()
+                    for line in lines[1:]:
+                        parts = line.split()
+                        if parts[1] == '00000000':
+                            hex_gw = parts[2]
+                            gateway_ip = socket.inet_ntoa(bytes.fromhex(hex_gw)[::-1])
+                            if not gateway_ip.startswith("172.17."):
+                                local_network_ip = gateway_ip
+                                break
+            except:
+                pass
+
+        # 4. General Case: Physical Linux Server, VPS, or Native Host execution
         if not local_network_ip:
             try:
                 with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
@@ -372,7 +373,7 @@ def webServer(session, event, stdin_fd, predetermined_input, port=None):
                     local_network_ip = s.getsockname()[0]
             except:
                 pass
-        # --------------------------------------------------------------------- 
+        # ---------------------------------------------------------------------
         print(
             f"""Ikabot web server is about to be run on {bcolors.BLUE}http://127.0.0.1:{port}{bcolors.ENDC} {'and ' + bcolors.BLUE + 'http://' + str(local_network_ip) + ':' + port + bcolors.ENDC if local_network_ip else ''}"""
         )
@@ -404,7 +405,7 @@ def webServer(session, event, stdin_fd, predetermined_input, port=None):
         # Ignore Ctrl+C 
         signal.signal(signal.SIGINT, signal.SIG_IGN)
         session.setStatus(
-            f"""SISIrunning on http://127.0.0.1:{port} {'and '+'http://' + str(local_network_ip) + ':' + port if local_network_ip else ''}"""
+            f"""running on http://127.0.0.1:{port} {'and '+'http://' + str(local_network_ip) + ':' + port if local_network_ip else ''}"""
         )
         event.set()
         
