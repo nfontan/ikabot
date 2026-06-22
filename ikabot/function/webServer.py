@@ -319,12 +319,44 @@ def webServer(session, event, stdin_fd, predetermined_input, port=None):
                     break
                 port = str(int(port) + 1)
 
-        # try to get local network ip if possible
+        # --- GLOBAL IP DETECTION (Multiplatform / Docker / WSL / Host) ---
         local_network_ip = None
+        
+        # 1. Case: Docker Desktop (Windows/macOS)
         try:
-            local_network_ip = socket.gethostbyname(socket.gethostname())
-        except:
+            local_network_ip = socket.gethostbyname("host.docker.internal")
+        except socket.gaierror:
             pass
+
+        # 2. Case: Native Docker on Linux/VPS (Bridge Mode)
+        # If running inside Docker on Linux, the host IP corresponds to the Default Gateway
+        if not local_network_ip and os.path.exists("/.dockerenv"):
+            try:
+                # Read the Linux routing table to fetch the Gateway of the Docker network
+                with open("/proc/net/route", "r") as f:
+                    lines = f.readlines()
+                    for line in lines[1:]: # Ignore the header
+                        parts = line.split()
+                        # '00000000' indicates the default route (Default Gateway)
+                        if parts[1] == '00000000':
+                            # The IP is in reverse hexadecimal, convert it to standard dot-decimal format
+                            hex_gw = parts[2]
+                            local_network_ip = socket.inet_ntoa(
+                                bytes.fromhex(hex_gw)[::-1]
+                            )
+                            break
+            except:
+                pass
+
+        # 3. General Case: Physical Server, VPS, WSL, or Docker in Host Mode
+        if not local_network_ip:
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                    # Connect to a generic IP to force the OS to evaluate the primary routing interface
+                    s.connect(("192.168.1.1", 80))
+                    local_network_ip = s.getsockname()[0]
+            except:
+                pass        
         print(
             f"""Ikabot web server is about to be run on {bcolors.BLUE}http://127.0.0.1:{port}{bcolors.ENDC} {'and ' + bcolors.BLUE + 'http://' + str(local_network_ip) + ':' + port + bcolors.ENDC if local_network_ip else ''}"""
         )
