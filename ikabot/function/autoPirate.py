@@ -263,10 +263,18 @@ def autoPirate(session, event, stdin_fd, predetermined_input):
                             raise Exception("Failed to resolve captcha too many times")
                         picture = extract_captcha_image(html)
                         if picture is None:
-                            picture = session.get(
-                                "action=Options&function=createCaptcha",
-                                fullResponse=True,
-                            ).content
+                            try:
+                                fallback = session.get(
+                                    "action=Options&function=createCaptcha",
+                                    fullResponse=True,
+                                )
+                                if fallback.content[:8] == b"\x89PNG\r\n\x1a\n":
+                                    picture = fallback.content
+                            except Exception:
+                                pass
+                        if picture is None:
+                            time.sleep(5)
+                            continue
                         captcha = resolveCaptcha(session, picture)
                         session.setStatus("Got captcha: " + captcha)
                         if captcha == "Error":
