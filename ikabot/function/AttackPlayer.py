@@ -486,13 +486,13 @@ def AttackPlayer(session, event, stdin_fd, predetermined_input):
                 is_vacation = state_city == "vacation"
                 is_no_longer_inactive = state_city is not None and not _is_inactive_grey(state_city)
 
-                #if is_vacation or is_no_longer_inactive:
-                #    razon = "entró en MODO VACACIONES" if is_vacation else f"ya NO es inactiva (estado: {state_city})"
-                #    msg_stop = f"Ataque DETENIDO antes de la ola {wave_number}. La ciudad {decodeUnicodeEscape(target_city['name'])} {razon}."
-                #    attack_log(msg_stop, level="WARN")
-                #    if send_notifications:
-                #        sendToBot(session, msg_stop)
-                #    break
+                if is_vacation or is_no_longer_inactive:
+                    razon = "entró en MODO VACACIONES" if is_vacation else f"ya NO es inactiva (estado: {state_city})"
+                    msg_stop = f"Ataque DETENIDO antes de la ola {wave_number}. La ciudad {decodeUnicodeEscape(target_city['name'])} {razon}."
+                    attack_log(msg_stop, level="WARN")
+                    if send_notifications:
+                        sendToBot(session, msg_stop)
+                    break
 
             # 2. ESPERA DE BARCOS PRE-ATAQUE (La Ola 1 sale directo de tu puerto)
             if wave_number > 1:
