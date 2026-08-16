@@ -47,7 +47,7 @@ ALL_POSSIBLE_ARMY_UNIT_GAME_IDS = list(UNIT_UPKEEP.keys())
 # =========================
 # LOG FILE
 # =========================
-ATTACK_LOG_FILE = "/home/pi/log-attack-player"
+ATTACK_LOG_FILE = r"/home/pi/log-attack-player"
 
 
 def attack_log(msg, level="INFO"):
@@ -74,7 +74,8 @@ def _force_origin_city_context(session, origin_city_id):
     """
     try:
         #session.get(f"view=city&cityId={origin_city_id}&currentCityId={origin_city_id}",noIndex=True)
-        session.get(f"view=city&cityId={origin_city_id}", noIndex=True)
+        #session.get(f"view=city&cityId={origin_city_id}", noIndex=True)
+        session.get(f"view=city&cityId={origin_city_id}")
     except Exception:
         pass
 
@@ -440,9 +441,12 @@ def AttackPlayer(session, event, stdin_fd, predetermined_input):
         same_island = str(origin_city.get('islandId', '')) == str(target_city.get('island_id', ''))
         attack_function = 'sendArmyPlunderLand' if same_island else 'sendArmyPlunderSea'
 
-        if not same_island:
-            _wait_until_ships_full(session, origin_city["id"], ATTACK_SHIPS)
-
+        #if not same_island:
+        #    _wait_until_ships_full(session, origin_city["id"], ATTACK_SHIPS)
+        
+        session.setStatus(f"Esperando {ATTACK_SHIPS} barcos para iniciar la misión...")
+        _wait_until_ships_full(session, origin_city["id"], ATTACK_SHIPS)
+        
         payload_base = {
             "action": "transportOperations",
             "function": attack_function,
@@ -460,10 +464,14 @@ def AttackPlayer(session, event, stdin_fd, predetermined_input):
 
         payload_base["transporter"] = str(ATTACK_SHIPS)
 
-        for unit_id in ALL_POSSIBLE_ARMY_UNIT_GAME_IDS:
-            payload_base[f"cargo_army_{unit_id}"] = str(selected_units_payload.get(unit_id, 0))
-            if unit_id in UNIT_UPKEEP:
-                payload_base[f"cargo_army_{unit_id}_upkeep"] = UNIT_UPKEEP[unit_id]
+        #for unit_id in ALL_POSSIBLE_ARMY_UNIT_GAME_IDS:
+        #    payload_base[f"cargo_army_{unit_id}"] = str(selected_units_payload.get(unit_id, 0))
+        #    if unit_id in UNIT_UPKEEP:
+        #        payload_base[f"cargo_army_{unit_id}_upkeep"] = UNIT_UPKEEP[unit_id]
+
+        #Force context
+        _force_origin_city_context(session, origin_city["id"])
+        session.get(f"view=militaryAdvisor&cityId={origin_city['id']}&ajax=1", noIndex=True)
 
         last_delay = 0
 
@@ -472,35 +480,51 @@ def AttackPlayer(session, event, stdin_fd, predetermined_input):
             wave_number = i + 1
             attack_log(f"WAVE {wave_number}/{number_of_waves} started")
 
-            # 1. Verificación de estado del objetivo (Activación o Vacaciones)
+            # 1. Verificación de estado del objetivo (Vacaciones o Activación)
             if wave_number > 1:
                 state_city = _get_city_state(session, target_city)
                 is_vacation = state_city == "vacation"
                 is_no_longer_inactive = state_city is not None and not _is_inactive_grey(state_city)
 
-                if is_vacation or is_no_longer_inactive:
-                    razon = "entró en MODO VACACIONES" if is_vacation else f"ya NO es inactiva (estado: {state_city})"
-                    msg_stop = f"Ataque DETENIDO antes de la ola {wave_number}. La ciudad {decodeUnicodeEscape(target_city['name'])} {razon}."
-                    attack_log(msg_stop, level="WARN")
-                    if send_notifications:
-                        sendToBot(session, msg_stop)
-                    break
+                #if is_vacation or is_no_longer_inactive:
+                #    razon = "entró en MODO VACACIONES" if is_vacation else f"ya NO es inactiva (estado: {state_city})"
+                #    msg_stop = f"Ataque DETENIDO antes de la ola {wave_number}. La ciudad {decodeUnicodeEscape(target_city['name'])} {razon}."
+                #    attack_log(msg_stop, level="WARN")
+                #    if send_notifications:
+                #        sendToBot(session, msg_stop)
+                #    break
 
-            # 2. ESPERA DE BARCOS PRE-ATAQUE (Para asegurar disponibilidad)
-            _wait_until_ships_full(session, origin_city["id"], ATTACK_SHIPS)
+            # 2. ESPERA DE BARCOS PRE-ATAQUE (La Ola 1 sale directo de tu puerto)
+            if wave_number > 1:
+                session.setStatus(f"Ola {wave_number}/{number_of_waves} enviada. Esperando regreso de barcos...")
+                _wait_until_ships_full(session, origin_city["id"], ATTACK_SHIPS)
 
-            # 3. RE-FORZAR CONTEXTO Y BLINDAJE DE PAYLOAD
+            # 3. BLINDAJE ABSOLUTO DE CONTEXTO Y PAYLOAD
             _force_origin_city_context(session, origin_city["id"])
+            
             payload = dict(payload_base)
             payload["cityId"] = str(origin_city['id'])
             payload["currentCityId"] = str(origin_city['id'])
 
+            # --- CORRECCIÓN CLAVE ---
+            # Refrescamos dinámicamente el token de seguridad con el último válido obtenido 
+            # tras forzar el contexto. Esto evita el autoretintento que mezcla las ciudades.
+            payload["actionRequest"] = config.actionRequest
+
+            # Inyección íntegra de las tropas seleccionadas
+            for unit_id in ALL_POSSIBLE_ARMY_UNIT_GAME_IDS:
+                payload[f"cargo_army_{unit_id}"] = str(selected_units_payload.get(unit_id, 0))
+                if unit_id in UNIT_UPKEEP:
+                    payload[f"cargo_army_{unit_id}_upkeep"] = UNIT_UPKEEP[unit_id]
+
             # 4. ENVÍO DEL ATAQUE
+            session.setStatus(f"Enviando Ola {wave_number}/{number_of_waves}...")
             response_data = session.post(params=payload)
             response_json = json.loads(response_data, strict=False)
 
             success = True
             server_msg = ""
+
             for item in response_json:
                 if item[0] == 'provideFeedback' and item[1] and item[1][0].get('type') == 11:
                     server_msg = re.sub('<[^<]+?>', ' ', item[1][0]['text']).strip()
@@ -509,13 +533,71 @@ def AttackPlayer(session, event, stdin_fd, predetermined_input):
 
             attack_log(f"WAVE {wave_number}/{number_of_waves}: status={'SUCCESS' if success else 'FAILED'} server_msg={server_msg!r}")
 
-            # 5. GESTIÓN DE ESPERAS POST-ATAQUE (Simulación Humana con Reloj Dinámico)
+            if not success:
+                unidades_enviadas = {k: v for k, v in selected_units_payload.items() if int(v) > 0}
+                diag_msg = (
+                    f"DIAGNÓSTICO BUG | "
+                    f"Origen esperado: {decodeUnicodeEscape(origin_city['name'])}({origin_city['id']}) | "
+                    f"Payload cityId: {payload.get('cityId')} | "
+                    f"Payload currentCityId: {payload.get('currentCityId')} | "
+                    f"Token inyectado: {payload.get('actionRequest')} | "
+                    f"Unidades enviadas en payload: {unidades_enviadas}"
+                )
+                attack_log(diag_msg, level="ERROR")
+                break
+
+            # 5. GESTIÓN DE ESPERAS POST-ATAQUE Y FILTRO DE ENEMIGO SECO UNIVERSAL
             if success and wave_number < number_of_waves:
-                # Actualización: Ahora indica "X de Y" oleadas
+                # Paso A: Esperamos que los barcos regresen a puerto con la carga
                 session.setStatus(f"Ola {wave_number}/{number_of_waves} enviada. Esperando regreso de barcos...")
                 _wait_until_ships_full(session, origin_city["id"], ATTACK_SHIPS)
 
-                # Calcular delay humano (Base + 1 a 3 min random)
+                # Paso B: Consultamos el listado de informes de guerra finalizados
+                _force_origin_city_context(session, origin_city["id"])
+                combat_list_data = session.get("view=militaryAdvisorCombatList&activeTab=tab_militaryAdvisorCombatList&ajax=1")
+                
+                enemy_dry = False
+                try:
+                    json_data = json.loads(combat_list_data, strict=False)
+                    html_report_list = ""
+                    for block in json_data:
+                        if block[0] == "changeView" and block[1][0] == "militaryAdvisorCombatList":
+                            html_report_list = block[1][1]
+                            break
+                    
+                    if html_report_list:
+                        # Extraemos las filas de los combates finalizados
+                        combat_rows = re.findall(r'<tr class="(?:green|green bold)".*?>(.*?)</tr>', html_report_list, re.DOTALL)
+                        if combat_rows:
+                            # Analizamos la última batalla (la más reciente que acaba de terminar)
+                            last_battle_html = combat_rows[0]
+                            
+                            # Si el ataque fue exitoso pero no contiene ningún icono de recursos capturados
+                            # ni tablas de materias primas robadas (revisando patrones estructurales del HTML de Ikariam)
+                            if "resource_icon" not in last_battle_html and "resources" not in last_battle_html:
+                                # Doble verificación: solicitamos el reporte en detalle de forma interna para confirmar
+                                combat_id_match = re.search(r'combatId=(\d+)', last_battle_html)
+                                if combat_id_match:
+                                    combat_id = combat_id_match.group(1)
+                                    detailed_report = session.get(f"view=militaryAdvisorReportView&combatId={combat_id}&ajax=1")
+                                    # Si en el reporte detallado no figura la lista de recursos robados (ul class="resources")
+                                    if "resources" not in detailed_report:
+                                        enemy_dry = True
+                except Exception as e:
+                    attack_log(f"Error analizando historial de reportes de guerra: {str(e)}", level="DEBUG")
+
+                # Si el análisis del reporte confirma que el saqueo resultó VACÍO, abortamos las olas restantes
+                if enemy_dry:
+                    msg_empty_stop = (
+                        f"Ataque ABORTADO tras la ola {wave_number}. "
+                        f"El informe de guerra confirma que el último saqueo resultó VACÍO. El enemigo no tiene recursos."
+                    )
+                    attack_log(msg_empty_stop, level="WARN")
+                    if send_notifications:
+                        sendToBot(session, msg_empty_stop)
+                    break
+
+                # Paso C: Si traía recursos, calculamos el delay humano (Base + 1 a 3 min random)
                 extra_random_minutes = random.randint(1, 3)
                 total_wait_minutes = int(base_delay_minutes) + extra_random_minutes
                 
@@ -524,7 +606,7 @@ def AttackPlayer(session, event, stdin_fd, predetermined_input):
                 if send_notifications:
                     sendToBot(session, f"Ola {wave_number}/{number_of_waves} exitosa. Barcos de regreso. Esperando {total_wait_minutes} min para la siguiente.")
 
-                # Bucle de cuenta regresiva con contador "X de Y"
+                # Paso D: Cuenta regresiva visual minuto a minuto
                 for remaining in range(total_wait_minutes, 0, -1):
                     session.setStatus(f"Ola {wave_number}/{number_of_waves} - Próxima en: {remaining} min (simulación humana)")
                     wait(60)
@@ -535,9 +617,6 @@ def AttackPlayer(session, event, stdin_fd, predetermined_input):
                 session.setStatus(f"Misión finalizada. {number_of_waves}/{number_of_waves} olas enviadas.")
                 if send_notifications:
                     sendToBot(session, f"Misión de ataque completada: {number_of_waves} olas enviadas.")
-
-            if not success:
-                break
 
         attack_log("END AttackPlayer: all waves dispatched")
 
