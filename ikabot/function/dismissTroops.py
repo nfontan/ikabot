@@ -132,6 +132,24 @@ def parseDismissableUnits(html):
     return units
 
 
+def isSpartan(unit):
+    """
+    Detects Spartan units by their internal identifier or displayed name
+
+    Parameters
+    ----------
+    unit : dict
+
+    Returns
+    -------
+    bool
+    """
+    return (
+        "spartan" in unit["identifier"].lower()
+        or "spartan" in unit["name"].lower()
+    )
+
+
 def getCategoryUnits(session, city_id, troops):
     """
     Parameters
@@ -164,14 +182,73 @@ def getCategoryUnits(session, city_id, troops):
         return tab, parseDismissableUnits(html)
 
 
-def readMultiSelection(total):
+def displayAvailableUnits(ids, garrisons):
+    """
+    Prints an overview table of the units available to dismiss per city,
+    mimicking the View Army summary table
+
+    Parameters
+    ----------
+    ids : list[str]
+    garrisons : dict
+
+    Returns
+    -------
+    bool
+    """
+    data = {}
+    all_names = set()
+    for city_id in ids:
+        units = {}
+        for unit in garrisons[city_id]["units"]:
+            units[unit["name"]] = unit["available"]
+            all_names.add(unit["name"])
+        data[city_id] = units
+
+    if not all_names:
+        return False
+
+    col_width = max(15, max(len(garrisons[city_id]["city_name"]) for city_id in ids))
+
+    header = "{:<25}".format("Unit")
+    for city_id in ids:
+        header += "|{:>{}}".format(garrisons[city_id]["city_name"][:col_width], col_width)
+    header += "|{:>{}}".format("Total", col_width)
+    print(header)
+    print("-" * len(header))
+
+    grand_total = 0
+    for name in sorted(all_names):
+        row = "{:<25}".format(name[:25])
+        unit_total = 0
+        for city_id in ids:
+            count = data[city_id].get(name, 0)
+            row += "|{:>{}}".format(addThousandSeparator(count), col_width)
+            unit_total += count
+        row += "|{:>{}}".format(addThousandSeparator(unit_total), col_width)
+        print(row)
+        grand_total += unit_total
+
+    print("-" * len(header))
+    total_row = "{:<25}".format("Total")
+    for city_id in ids:
+        city_total = sum(data[city_id].values())
+        total_row += "|{:>{}}".format(addThousandSeparator(city_total), col_width)
+    total_row += "|{:>{}}".format(addThousandSeparator(grand_total), col_width)
+    print(total_row)
+    return True
+
+
+def readMultiSelection(total, allow_skip=False):
     """
     Reads a comma separated selection of numbers between 1 and total.
     'a' or 'all' selects every option.
+    's' or 'skip' skips the selection (returns no options) if allow_skip is True.
 
     Parameters
     ----------
     total : int
+    allow_skip : bool
 
     Returns
     -------
@@ -183,6 +260,8 @@ def readMultiSelection(total):
         if not tokens:
             print("Invalid option")
             continue
+        if allow_skip and ("s" in tokens or "skip" in tokens):
+            return []
         if "a" in tokens or "all" in tokens:
             return list(range(1, total + 1))
         try:
@@ -233,6 +312,15 @@ def dismissTroops(session, event, stdin_fd, predetermined_input):
         selected_ids = [ids[index - 1] for index in selection]
 
         banner()
+        include_spartans = (
+            read(
+                msg="Do you want to include Spartans? [y/N]",
+                values=["y", "Y", "n", "N", ""],
+            ).lower()
+            == "y"
+        )
+
+        banner()
         print("(1) Troops")
         print("(2) Ships")
         troops = read(min=1, max=2, digit=True) == 1
@@ -247,6 +335,8 @@ def dismissTroops(session, event, stdin_fd, predetermined_input):
             session.get(city_url + str(city_id))
             humanWait()
             tab, units = getCategoryUnits(session, city_id, troops)
+            if not include_spartans:
+                units = [unit for unit in units if not isSpartan(unit)]
             garrisons[city_id] = {"city_name": city_name, "tab": tab, "units": units}
             humanWait()
 
@@ -257,39 +347,35 @@ def dismissTroops(session, event, stdin_fd, predetermined_input):
             event.set()
             return
 
-        types_by_identifier = {}
-        for garrison in garrisons.values():
-            for unit in garrison["units"]:
-                types_by_identifier.setdefault(unit["identifier"], unit["name"])
-        identifiers = list(types_by_identifier)
-
         banner()
-        print(
-            "Choose which {} to dismiss, comma separated lets you choose multiple:".format(
-                category
-            )
-        )
-        for i, identifier in enumerate(identifiers, start=1):
-            print("({}) {}".format(i, types_by_identifier[identifier]))
-        print("(a) All")
-        selection = readMultiSelection(len(identifiers))
-        chosen_identifiers = [identifiers[index - 1] for index in selection]
+        print("Available {} per city:\n".format(category))
+        displayAvailableUnits(selected_ids, garrisons)
 
-        banner()
-        print("How many do you want to dismiss?\n")
         plan = []
         for city_id in selected_ids:
             garrison = garrisons[city_id]
-            present_units = [
-                unit
-                for unit in garrison["units"]
-                if unit["identifier"] in chosen_identifiers
-            ]
+            present_units = garrison["units"]
             if not present_units:
                 continue
-            print("{}:".format(garrison["city_name"]))
+            print("\n{}:".format(garrison["city_name"]))
+            print(
+                "Choose which {} to dismiss (comma separated lets you choose multiple):".format(
+                    category
+                )
+            )
+            for i, unit in enumerate(present_units, start=1):
+                print(
+                    "({}) {} ({})".format(
+                        i, unit["name"], addThousandSeparator(unit["available"])
+                    )
+                )
+            print("(a) All")
+            print("(s) Skip this city")
+            selection = readMultiSelection(len(present_units), allow_skip=True)
+            chosen_units = [present_units[index - 1] for index in selection]
+
             city_units = []
-            for unit in present_units:
+            for unit in chosen_units:
                 amount = read(
                     msg="{} ({} available): ".format(
                         unit["name"], addThousandSeparator(unit["available"])
@@ -309,7 +395,7 @@ def dismissTroops(session, event, stdin_fd, predetermined_input):
                     unit = dict(unit)
                     unit["amount"] = amount
                     city_units.append(unit)
-            print("")
+
             if city_units:
                 plan.append(
                     {
