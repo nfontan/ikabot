@@ -22,6 +22,7 @@ from ikabot.function.checkForUpdate import checkForUpdate
 from ikabot.function.constructBuilding import constructBuilding
 from ikabot.function.constructionList import constructionList
 from ikabot.function.decaptchaConf import decaptchaConf
+from ikabot.function.dismissTroops import dismissTroops
 from ikabot.function.distributeResources import distributeResources
 from ikabot.function.donate import donate
 from ikabot.function.donationBot import donationBot
@@ -141,6 +142,7 @@ def menu(session, checkUpdate=True):
          1202: stationArmy,
          1203: UpgradeUnits,
          1204: viewArmy,
+         1205: dismissTroops,
         13: shipMovements,
         14: constructBuilding,
         15: update,
@@ -260,7 +262,8 @@ def menu(session, checkUpdate=True):
         print("(2) Send Troops/Ships")
         print("(3) Upgrade Army")
         print("(4) View Army")
-        selected = read(min=0, max=4, digit=True)
+        print("(5) Dismiss Troops/Ships")
+        selected = read(min=0, max=5, digit=True)
         if selected == 0:
             menu(session)
             return
