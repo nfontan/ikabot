@@ -455,7 +455,7 @@ def dismissTroops(session, event, stdin_fd, predetermined_input):
 
         print("\nProceed? [y/N]")
         response = read(values=["y", "Y", "n", "N", ""])
-        if response.lower() == "n":
+        if response.lower() != "y":
             event.set()
             return
 
