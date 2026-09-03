@@ -26,10 +26,11 @@ except Exception:
     LOCAL_DECAPTCHA = False
 
 try:
-    from ikabot.helpers.piratesDecaptcha import decaptcha_logger
+    from ikabot.helpers.logging import getLogger
+    _logger = getLogger(__name__)
 except Exception:
     import logging
-    decaptcha_logger = logging.getLogger("decaptcha")
+    _logger = logging.getLogger(__name__)
 
 
 def extract_captcha_image(html):
@@ -373,7 +374,7 @@ def resolveCaptcha(session, picture):
             try:
                 return getPiratesCaptchaSolution(session, picture)
             except Exception as e:
-                decaptcha_logger.warning(
+                _logger.warning(
                     "Remote pirates captcha API failed: %s" % e
                 )
                 return "Error"
