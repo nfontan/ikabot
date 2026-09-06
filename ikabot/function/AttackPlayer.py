@@ -49,6 +49,13 @@ ALL_POSSIBLE_ARMY_UNIT_GAME_IDS = list(UNIT_UPKEEP.keys())
 # =========================
 ATTACK_LOG_FILE = r"/home/pi/log-attack-player"
 
+# =========================
+# CONFIG
+# =========================
+# Si True, el bot sigue atacando aunque el objetivo deje de estar inactivo (se vuelva activo).
+# Las ciudades en MODO VACACIONES igualmente detienen el ataque (no se las puede atacar).
+ATTACK_ACTIVE_CITIES = False
+
 
 def attack_log(msg, level="INFO"):
     try:
@@ -71,11 +78,18 @@ def read_yes_no(msg, default='y'):
 def _force_origin_city_context(session, origin_city_id):
     """
     Force server-side current city to origin before any wave/selection request.
+    Also patches session's __token() so that session.post() fetches the CSRF
+    token from the origin city page (keeping server context correct) instead
+    of loading the base URL (which resets context to the default city).
     """
     try:
-        #session.get(f"view=city&cityId={origin_city_id}&currentCityId={origin_city_id}",noIndex=True)
-        #session.get(f"view=city&cityId={origin_city_id}", noIndex=True)
         session.get(f"view=city&cityId={origin_city_id}")
+
+        def _context_aware_token():
+            html = session.get(f"view=city&cityId={origin_city_id}")
+            return re.search(r'actionRequest"?:\s*"(.*?)"', html).group(1)
+
+        session._Session__token = _context_aware_token
     except Exception:
         pass
 
@@ -486,9 +500,25 @@ def AttackPlayer(session, event, stdin_fd, predetermined_input):
                 is_vacation = state_city == "vacation"
                 is_no_longer_inactive = state_city is not None and not _is_inactive_grey(state_city)
 
-                if is_vacation or is_no_longer_inactive:
-                    razon = "entró en MODO VACACIONES" if is_vacation else f"ya NO es inactiva (estado: {state_city})"
-                    msg_stop = f"Ataque DETENIDO antes de la ola {wave_number}. La ciudad {decodeUnicodeEscape(target_city['name'])} {razon}."
+                # Las ciudades en MODO VACACIONES nunca se pueden atacar: siempre se detiene.
+                if is_vacation:
+                    msg_stop = (
+                        f"Ataque DETENIDO antes de la ola {wave_number}. "
+                        f"La ciudad {decodeUnicodeEscape(target_city['name'])} entró en MODO VACACIONES."
+                    )
+                    attack_log(msg_stop, level="WARN")
+                    if send_notifications:
+                        sendToBot(session, msg_stop)
+                    break
+
+                # Si el objetivo dejó de estar inactivo: se detiene solo si no está
+                # habilitada la flag de atacar ciudades activas (ATTACK_ACTIVE_CITIES).
+                if is_no_longer_inactive and not ATTACK_ACTIVE_CITIES:
+                    state_label = state_city if state_city else "activa"
+                    msg_stop = (
+                        f"Ataque DETENIDO antes de la ola {wave_number}. "
+                        f"La ciudad {decodeUnicodeEscape(target_city['name'])} ya NO es inactiva (estado: {state_label})."
+                    )
                     attack_log(msg_stop, level="WARN")
                     if send_notifications:
                         sendToBot(session, msg_stop)
@@ -568,10 +598,18 @@ def AttackPlayer(session, event, stdin_fd, predetermined_input):
                     if html_report_list:
                         # Extraemos las filas de los combates finalizados
                         combat_rows = re.findall(r'<tr class="(?:green|green bold)".*?>(.*?)</tr>', html_report_list, re.DOTALL)
-                        if combat_rows:
-                            # Analizamos la última batalla (la más reciente que acaba de terminar)
-                            last_battle_html = combat_rows[0]
-                            
+                        # Buscamos la fila que coincide con nuestra ciudad objetivo
+                        # (evita confundir reportes de otros ataques o ciudades)
+                        target_city_id_str = str(target_city['id'])
+                        matched_row = None
+                        for row in combat_rows:
+                            if f'cityId={target_city_id_str}' in row:
+                                matched_row = row
+                                break
+
+                        if matched_row:
+                            last_battle_html = matched_row
+
                             # Si el ataque fue exitoso pero no contiene ningún icono de recursos capturados
                             # ni tablas de materias primas robadas (revisando patrones estructurales del HTML de Ikariam)
                             if "resource_icon" not in last_battle_html and "resources" not in last_battle_html:
@@ -579,10 +617,50 @@ def AttackPlayer(session, event, stdin_fd, predetermined_input):
                                 combat_id_match = re.search(r'combatId=(\d+)', last_battle_html)
                                 if combat_id_match:
                                     combat_id = combat_id_match.group(1)
-                                    detailed_report = session.get(f"view=militaryAdvisorReportView&combatId={combat_id}&ajax=1")
-                                    # Si en el reporte detallado no figura la lista de recursos robados (ul class="resources")
-                                    if "resources" not in detailed_report:
-                                        enemy_dry = True
+                                    detailed_response = session.get(f"view=militaryAdvisorReportView&combatId={combat_id}&ajax=1")
+
+                                    # La respuesta AJAX es un JSON con el HTML del reporte embebido
+                                    # (comillas escapadas). Extraemos el HTML real antes de inspeccionarlo.
+                                    detailed_html = ""
+                                    try:
+                                        report_json = json.loads(detailed_response, strict=False)
+                                        for block in report_json:
+                                            if block[0] == "changeView" and len(block[1]) > 1:
+                                                detailed_html = block[1][1]
+                                                break
+                                    except Exception:
+                                        detailed_html = detailed_response
+
+                                    if detailed_html:
+                                        # Solo consideramos "enemigo seco" si NUESTRA ola GANÓ la batalla
+                                        # pero no logró robar nada (ul class="resources" ausente).
+                                        # Una batalla PERDIDA tampoco muestra recursos robados,
+                                        # pero la ciudad objetivo sigue teniendo recursos.
+                                        won = False
+                                        winners_match = re.search(
+                                            r'class="winners headline"[^>]*>.*?Ganador:\s*<br\s*/?>\s*([^<]+)<',
+                                            detailed_html, re.DOTALL
+                                        )
+                                        if winners_match:
+                                            winner_name = re.sub(r'\s+', ' ', winners_match.group(1)).strip()
+                                            won = session.username in winner_name
+                                        losers_match = re.search(
+                                            r'class="losers headline"[^>]*>.*?Perdedor:\s*<br\s*/?>\s*([^<]+)<',
+                                            detailed_html, re.DOTALL
+                                        )
+                                        if losers_match:
+                                            loser_name = re.sub(r'\s+', ' ', losers_match.group(1)).strip()
+                                            if session.username in loser_name:
+                                                won = False
+
+                                        if won and "resources" not in detailed_html:
+                                            enemy_dry = True
+                                        elif not won:
+                                            attack_log(
+                                                f"Ola {wave_number}: la batalla contra {decodeUnicodeEscape(target_city['name'])} "
+                                                f"se PERDIÓ (combatId={combat_id}). No se aborta: el enemigo puede tener recursos.",
+                                                level="WARN"
+                                            )
                 except Exception as e:
                     attack_log(f"Error analizando historial de reportes de guerra: {str(e)}", level="DEBUG")
 
