@@ -1,9 +1,11 @@
 #! /usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+import hashlib
 import json
 import os
 import re
+import time
 from decimal import *
 
 from ikabot.config import *
@@ -20,7 +22,12 @@ getcontext().prec = 30
 
 resources_abbr = {"1": "(W)", "2": "(M)", "3": "(C)", "4": "(S)"}
 
-CACHE_FILE = os.path.join(os.path.expanduser("~"), ".ikabot_getstatus_cache.json")
+def getCacheFile(session):
+    account = hashlib.sha256(
+        ("ikabot-getstatus-" + getattr(session, "mail", "unknown")).encode("utf-8")
+    ).hexdigest()[:16]
+    cache_dir = os.path.dirname(os.path.abspath(ikaFile))
+    return os.path.join(cache_dir, "getstatus_{}.json".format(account))
 
 
 def parseCityProduction(html, typeGood):
@@ -294,20 +301,24 @@ def displayAccountSummary(data):
     )
 
 
-def saveCache(data):
+def saveCache(session, data):
     try:
-        with open(CACHE_FILE, "w") as f:
+        with open(getCacheFile(session), "w") as f:
+            data["saved_at"] = time.time()
             json.dump(data, f, ensure_ascii=False)
     except OSError:
         pass
 
 
-def loadCache():
+def loadCache(session):
     try:
-        with open(CACHE_FILE) as f:
-            return json.load(f)
+        with open(getCacheFile(session)) as f:
+            data = json.load(f)
     except (OSError, ValueError):
         return None
+    if not data.get("own_ids"):
+        return None
+    return data
 
 
 def collectData(session):
@@ -436,12 +447,19 @@ def getStatus(session, event, stdin_fd, predetermined_input):
             bcolors.WARNING,
         ]
 
-        data = loadCache()
+        data = loadCache(session)
         if data is None:
             data = collectData(session)
-            saveCache(data)
+            saveCache(session, data)
         else:
-            print("Using cached data - select (3) to refresh data")
+            saved_at = data.get("saved_at")
+            if saved_at is None:
+                stamp = ""
+            else:
+                stamp = " (from {})".format(
+                    time.strftime("%Y-%m-%d %H:%M", time.localtime(saved_at))
+                )
+            print("Using cached data{} - select (3) to refresh data".format(stamp))
             print()
 
         own_ids = data["own_ids"]
@@ -468,7 +486,7 @@ def getStatus(session, event, stdin_fd, predetermined_input):
                 banner()
                 print("Refreshing data...")
                 data = collectData(session)
-                saveCache(data)
+                saveCache(session, data)
                 own_ids = data["own_ids"]
                 continue
 
