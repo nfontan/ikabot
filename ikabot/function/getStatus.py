@@ -26,8 +26,11 @@ def getCacheFile(session):
     account = hashlib.sha256(
         ("ikabot-getstatus-" + getattr(session, "mail", "unknown")).encode("utf-8")
     ).hexdigest()[:16]
+    filename = "getstatus_{}.json".format(account)
     cache_dir = os.path.dirname(os.path.abspath(ikaFile))
-    return os.path.join(cache_dir, "getstatus_{}.json".format(account))
+    if not os.access(cache_dir, os.W_OK):
+        cache_dir = os.getenv("temp") if isWindows else "/tmp"
+    return os.path.join(cache_dir, filename)
 
 
 def parseCityProduction(html, typeGood):
@@ -302,12 +305,13 @@ def displayAccountSummary(data):
 
 
 def saveCache(session, data):
+    cache_file = getCacheFile(session)
     try:
-        with open(getCacheFile(session), "w") as f:
+        with open(cache_file, "w") as f:
             data["saved_at"] = time.time()
             json.dump(data, f, ensure_ascii=False)
     except OSError:
-        pass
+        print("Warning: could not write cache to {}".format(cache_file))
 
 
 def loadCache(session):
