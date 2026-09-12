@@ -1357,6 +1357,9 @@ class Session:
                     assert self.__isExpired(resp) is False
                 if "TXT_ERROR_WRONG_REQUEST_ID" in resp:
                     self.logger.warning("got TXT_ERROR_WRONG_REQUEST_ID, bad actionRequest")
+                    invalidate_token_cache = getattr(self, "_invalidate_token_cache", None)
+                    if invalidate_token_cache:
+                        invalidate_token_cache()
                     return self.post(
                         url=url_original,
                         payloadPost=payloadPost_original,

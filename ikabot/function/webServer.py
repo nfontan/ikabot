@@ -402,7 +402,12 @@ def webServer(session, event, stdin_fd, predetermined_input, port=None):
                 return _token_cache["token"]
             return original_token_method()
 
+        def _invalidate_token_cache():
+            _token_cache["token"] = None
+            _token_cache["ts"] = 0
+
         session._Session__token = _cached_token
+        session._invalidate_token_cache = _invalidate_token_cache
 
         try:
             # use_reloader=False avoid ghost process
