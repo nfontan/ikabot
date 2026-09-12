@@ -36,6 +36,10 @@ class ResponseTypes:
     RED = 11
     YELLOW = 12
 
+# reused for a short window to avoid an extra GET before every POST
+TOKEN_CACHE_TTL = 20  # seconds
+_token_cache = {"token": None, "ts": 0}
+
 if isWindows:
     web_cache_file = os.getenv("temp") + "/ikabot.webcache"
 else:
@@ -242,6 +246,14 @@ def webServer(session, event, stdin_fd, predetermined_input, port=None):
                     allow_redirects=False,
                 )
 
+            try:
+                token_match = re.search(r'actionRequest"?:\s*"(.*?)"', resp.text)
+                if token_match:
+                    _token_cache["token"] = token_match.group(1)
+                    _token_cache["ts"] = time.time()
+            except Exception:
+                pass
+
             if is_image:
                 # cache was missed, add to cache and send response
                 expires = datetime.utcnow() + timedelta(days=1)
@@ -380,7 +392,18 @@ def webServer(session, event, stdin_fd, predetermined_input, port=None):
             f"""running on http://127.0.0.1:{port} {'and '+'http://' + str(local_network_ip) + ':' + port if local_network_ip else ''}"""
         )
         event.set()
-        
+
+        # reuse a recent token instead of fetching a new page for every POST
+        original_token_method = session._Session__token
+
+        def _cached_token():
+            now = time.time()
+            if _token_cache["token"] and (now - _token_cache["ts"]) < TOKEN_CACHE_TTL:
+                return _token_cache["token"]
+            return original_token_method()
+
+        session._Session__token = _cached_token
+
         try:
             # use_reloader=False avoid ghost process
             app.run(host="0.0.0.0", port=int(port), threaded=True, use_reloader=False)
