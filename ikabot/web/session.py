@@ -1363,6 +1363,8 @@ class Session:
                         params=params_original,
                         ignoreExpire=ignoreExpire,
                         noIndex=noIndex,
+                        fullResponse=fullResponse,
+                        noQuery=noQuery,
                     )
                 # --- update developer runtime info ---
                 try:
