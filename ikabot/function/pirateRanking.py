@@ -20,9 +20,13 @@
 #      to Telegram so the last account broadcasts the final link
 #
 # Scheduling:
-#   Accounts should be staggered 5+ minutes apart to avoid race conditions
-#   when reading/updating the shared paste.
-#   Example: 18:00, 18:05, 18:10, 18:15, ...
+#   All accounts can be scheduled at the SAME time (e.g. everyone at 13:00).
+#   Right before touching the shared paste, each account acquires a small
+#   distributed lock (itself a dedicated Pastebin paste titled
+#   "<title> -- LOCK") so the read-append-create-delete cycle never overlaps
+#   between accounts; whoever gets there first holds the lock while it
+#   updates the paste, the rest wait their turn and retry. Manual staggering
+#   is no longer required.
 #
 # Configuration per account:
 #   pastebin_dev_key        API developer key (get it at https://pastebin.com/doc_api)
@@ -38,6 +42,7 @@ import json
 import os
 import random
 import time
+import hashlib
 import requests
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
@@ -57,6 +62,39 @@ def get_saved_pastebin_config(session):
         return sessionData["shared"].get("pastebin")
     except Exception:
         return None
+
+
+def ranking_fingerprint(ranking):
+    """Stable fingerprint of a ranking's (position, name, points) triples, used
+    to detect a fetch that came back suspiciously identical to a previous
+    successful run (usually a sign the response was stale/cached rather than
+    the ranking genuinely not moving)."""
+    key = "|".join(
+        "{}:{}:{}".format(e["position"], e["name"], e["points"]) for e in ranking
+    )
+    return hashlib.md5(key.encode("utf-8")).hexdigest()
+
+
+def get_last_ranking_snapshot(session):
+    """Load this account's last successfully published ranking fingerprint/date."""
+    try:
+        sessionData = session.getSessionData()
+        return sessionData.get("pirateRankingSnapshot")
+    except Exception:
+        return None
+
+
+def save_ranking_snapshot(session, fingerprint):
+    """Persist this account's ranking fingerprint so the next run can detect a stale repeat."""
+    try:
+        sessionData = session.getSessionData()
+        sessionData["pirateRankingSnapshot"] = {
+            "fingerprint": fingerprint,
+            "date": datetime.now().strftime("%Y-%m-%d"),
+        }
+        session.setSessionData(sessionData)
+    except Exception:
+        pass
 
 
 def pirateRanking(session, event, stdin_fd, predetermined_input):
@@ -209,6 +247,25 @@ def pirateRanking(session, event, stdin_fd, predetermined_input):
     set_child_mode(session)
     event.set()
 
+    if execution_option == 2:
+        # Rewrite our own processList entry so the main menu's running-task
+        # table shows the scheduled time instead of just "pirateRanking",
+        # same approach loadCustomModule.py uses to show its module name.
+        try:
+            sd = session.getSessionData()
+            plist = sd.get("processList", [])
+            my_pid = os.getpid()
+            for p in plist:
+                if p.get("pid") == my_pid:
+                    p["action"] = "pirateRanking (daily {:02d}:{:02d})".format(
+                        scheduled_time[0], scheduled_time[1]
+                    )
+                    break
+            sd["processList"] = plist
+            session.setSessionData(sd)
+        except Exception:
+            pass
+
     if execution_option == 1:
         try:
             do_it(session, save_file, send_telegram, send_pastebin, pastebin_config)
@@ -273,12 +330,36 @@ def do_it(session, save_file=True, send_telegram=False, send_pastebin=False, pas
     # Parse ranking data from the response
     ranking_data = parse_ranking(html)
 
-    # Check if ranking data is valid
-    skip_coordinates = False
+    # Detect a fetch that came back byte-identical to the last successful run
+    # on a different day - almost always means we got a stale/cached response
+    # rather than the ranking genuinely freezing (real Puntos de rapiña move
+    # a lot day to day). If detected, we still write the local file below for
+    # debugging, but we skip publishing it (Telegram/Pastebin) so a stale
+    # report never overwrites good data on the shared paste.
+    stale_detected = False
+    new_fingerprint = None
     if ranking_data and "ranking" in ranking_data:
+        new_fingerprint = ranking_fingerprint(ranking_data["ranking"])
+        last_snapshot = get_last_ranking_snapshot(session)
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        if (
+            last_snapshot
+            and last_snapshot.get("fingerprint") == new_fingerprint
+            and last_snapshot.get("date") != today_str
+        ):
+            stale_detected = True
+            print(
+                "WARNING: ranking data is identical to the last successful run "
+                "on {} - looks stale/cached, not a fresh fetch. Skipping "
+                "Telegram/Pastebin publish for this run.".format(last_snapshot.get("date"))
+            )
+
+    # Check if ranking data is valid
+    skip_coordinates = stale_detected
+    if ranking_data and "ranking" in ranking_data and not stale_detected:
         ranking = ranking_data["ranking"]
         own_username = session.username if hasattr(session, 'username') else None
-        
+
         # Check if own account has 0 points
         if own_username:
             for entry in ranking:
@@ -293,7 +374,7 @@ def do_it(session, save_file=True, send_telegram=False, send_pastebin=False, pas
             if all_zero and len(ranking) > 0:
                 print("All players in ranking have 0 points. Skipping coordinate collection.")
                 skip_coordinates = True
-    else:
+    elif not stale_detected:
         # If no ranking data or parsing failed, skip coordinates
         print("Ranking data could not be parsed or is invalid. Skipping coordinate collection.")
         skip_coordinates = True
@@ -360,15 +441,33 @@ def do_it(session, save_file=True, send_telegram=False, send_pastebin=False, pas
             report_lines.append("Reason: {}".format(ranking_data["error"]))
         report_lines.append("Note: This may happen when your account has 0 points in ranking.")
     
+    if stale_detected:
+        report_lines.insert(
+            0,
+            "*** WARNING: this fetch is identical to a previous day's report - "
+            "looks stale/cached, NOT published to Telegram/Pastebin. ***\n",
+        )
+
     report_content = "\n".join(report_lines) + "\n"
-    
-    # Save to file
+
+    # Save to file. Named per account + timestamp (used to be a single fixed
+    # path shared by every account, so whichever ran last silently overwrote
+    # everyone else's local copy).
     if save_file:
-        report_path = "/tmp/pirate_ranking_report.txt"
+        account_label = session.username if hasattr(session, 'username') and session.username else "account"
+        safe_label = re.sub(r'[^A-Za-z0-9_-]+', '_', account_label)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        report_path = "/tmp/pirate_ranking_report_{}_{}.txt".format(safe_label, timestamp)
         with open(report_path, "w", encoding="utf-8") as f:
             f.write(report_content)
         print("Report saved to: {}".format(report_path))
-    
+
+    if stale_detected:
+        # Don't touch Telegram or the shared Pastebin with data we don't
+        # trust; the local file above still has it for debugging.
+        print("Ranking update skipped (stale data).")
+        return
+
     # Send to Telegram
     if send_telegram:
         try:
@@ -376,7 +475,7 @@ def do_it(session, save_file=True, send_telegram=False, send_pastebin=False, pas
             print("Report sent to Telegram")
         except Exception as e:
             print("Error sending to Telegram: {}".format(e))
-    
+
     # Send to Pastebin
     if send_pastebin and pastebin_config:
         try:
@@ -392,7 +491,10 @@ def do_it(session, save_file=True, send_telegram=False, send_pastebin=False, pas
                 sendToBot(session, "Pirate Ranking updated on Pastebin: {}".format(paste_url))
         except Exception as e:
             print("Error sending to Pastebin: {}".format(e))
-    
+
+    if new_fingerprint:
+        save_ranking_snapshot(session, new_fingerprint)
+
     print("Ranking update completed.")
 
 
@@ -488,37 +590,122 @@ def pastebin_delete(api_dev_key, api_user_key, paste_key):
     return resp.text.strip()
 
 
+def pastebin_acquire_lock(api_dev_key, api_user_key, title, timeout=900, poll_interval=(5, 15)):
+    """
+    Acquire a simple distributed lock so several accounts scheduled at the
+    same time don't race each other's read-append-create-delete cycle on the
+    shared paste. The lock itself is a dedicated Pastebin paste titled
+    "<title> -- LOCK": whoever manages to be the sole/oldest holder of that
+    paste owns the lock; everyone else polls and retries.
+
+    Pastebin's API gives no atomic "create if not exists", so two accounts
+    can still both create a lock paste in the same instant - if that happens,
+    only the older one (by paste_date, tie-broken by paste_key) keeps it and
+    the other deletes its own attempt and retries.
+
+    Returns True once acquired, False if `timeout` seconds passed without it.
+    """
+    lock_title = title + " -- LOCK"
+    holder_id = "{}-{}".format(os.getpid(), int(time.time() * 1000))
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        pastes = pastebin_list_pastes(api_dev_key, api_user_key)
+        locks = [p for p in pastes if p['title'] == lock_title]
+
+        # A lock older than 10 minutes means its holder almost certainly
+        # crashed mid-update instead of releasing it; clear it out so we
+        # don't wait on a dead process forever.
+        stale_cutoff = time.time() - 600
+        stale_locks = [p for p in locks if p['date'] < stale_cutoff]
+        active_locks = [p for p in locks if p['date'] >= stale_cutoff]
+        for p in stale_locks:
+            try:
+                pastebin_delete(api_dev_key, api_user_key, p['key'])
+            except Exception:
+                pass
+
+        if not active_locks:
+            try:
+                new_url = pastebin_create(api_dev_key, api_user_key, lock_title, holder_id, private=1)
+                our_key = new_url.rstrip('/').rsplit('/', 1)[-1]
+            except Exception:
+                time.sleep(random.uniform(*poll_interval))
+                continue
+
+            # Give Pastebin's listing a moment to catch up, then check
+            # whether anyone else grabbed the lock in the same instant.
+            time.sleep(1.5)
+            pastes = pastebin_list_pastes(api_dev_key, api_user_key)
+            locks = [p for p in pastes if p['title'] == lock_title]
+            locks.sort(key=lambda p: (p['date'], p['key']))
+            if locks and locks[0]['key'] == our_key:
+                return True
+            # We lost the race - remove our attempt and retry.
+            try:
+                pastebin_delete(api_dev_key, api_user_key, our_key)
+            except Exception:
+                pass
+
+        time.sleep(random.uniform(*poll_interval))
+
+    return False
+
+
+def pastebin_release_lock(api_dev_key, api_user_key, title):
+    """Release the lock paste created by pastebin_acquire_lock."""
+    lock_title = title + " -- LOCK"
+    try:
+        pastes = pastebin_list_pastes(api_dev_key, api_user_key)
+        for p in pastes:
+            if p['title'] == lock_title:
+                pastebin_delete(api_dev_key, api_user_key, p['key'])
+    except Exception:
+        pass
+
+
 def pastebin_append_or_create(api_dev_key, api_user_key, title, new_content, private=1):
     """
     Append new_content to the existing paste matching `title`, or create a new one.
     Deletes the old paste after successful creation.
     Returns the new paste URL.
+
+    Guarded by pastebin_acquire_lock/pastebin_release_lock so several accounts
+    scheduled at the same time queue up instead of racing each other.
     """
-    pastes = pastebin_list_pastes(api_dev_key, api_user_key)
+    if not pastebin_acquire_lock(api_dev_key, api_user_key, title):
+        raise Exception(
+            "Timed out waiting for the shared Pastebin lock ('{} -- LOCK'); "
+            "another account may be stuck mid-update.".format(title)
+        )
 
-    existing = None
-    for p in pastes:
-        if p['title'] == title:
-            existing = p
-            break
+    try:
+        pastes = pastebin_list_pastes(api_dev_key, api_user_key)
 
-    full_content = new_content
-    if existing:
-        try:
-            old_content = pastebin_fetch_raw(api_dev_key, api_user_key, existing['key'])
-            full_content = old_content.rstrip('\n') + '\n\n--- New Report ---\n\n' + new_content
-        except Exception:
-            pass
+        existing = None
+        for p in pastes:
+            if p['title'] == title:
+                existing = p
+                break
 
-    new_url = pastebin_create(api_dev_key, api_user_key, title, full_content, private)
+        full_content = new_content
+        if existing:
+            try:
+                old_content = pastebin_fetch_raw(api_dev_key, api_user_key, existing['key'])
+                full_content = old_content.rstrip('\n') + '\n\n--- New Report ---\n\n' + new_content
+            except Exception:
+                pass
 
-    if existing:
-        try:
-            pastebin_delete(api_dev_key, api_user_key, existing['key'])
-        except Exception:
-            pass
+        new_url = pastebin_create(api_dev_key, api_user_key, title, full_content, private)
 
-    return new_url
+        if existing:
+            try:
+                pastebin_delete(api_dev_key, api_user_key, existing['key'])
+            except Exception:
+                pass
+
+        return new_url
+    finally:
+        pastebin_release_lock(api_dev_key, api_user_key, title)
 
 
 def parse_ranking_from_html(html):
@@ -703,6 +890,11 @@ def parse_ranking(html):
             if candidates:
                 candidates.sort(key=len, reverse=True)
                 html_content = candidates[0]
+                print(
+                    "WARNING: ranking view not found via the primary/secondary "
+                    "strategies; falling back to 'longest string in response' "
+                    "heuristic. Parsed data may be unreliable."
+                )
         
         if html_content:
             # Parse the HTML to extract ranking
