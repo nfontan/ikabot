@@ -44,7 +44,6 @@ import random
 import time
 import hashlib
 import requests
-import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 
 from ikabot.config import *
@@ -528,14 +527,21 @@ def pastebin_list_pastes(api_dev_key, api_user_key):
     resp = requests.post(url, data=data)
     if resp.text.startswith('Bad API request') or resp.text.startswith('No pastes found'):
         return []
-    root = ET.fromstring('<pastes>' + resp.text + '</pastes>')
+    # Pastebin doesn't escape paste titles in this response, so a title with a
+    # stray '<' or '&' (from an unrelated paste on this shared account) makes
+    # the whole listing not well-formed XML. Pull fields out with regex
+    # instead of ET.fromstring so one bad title can't break every listing.
+    def field(block, name, default=''):
+        m = re.search(r'<{0}>(.*?)</{0}>'.format(name), block, re.S)
+        return m.group(1) if m and m.group(1) != '' else default
+
     pastes = []
-    for paste_elem in root.findall('paste'):
+    for block in re.findall(r'<paste>(.*?)</paste>', resp.text, re.S):
         pastes.append({
-            'key': paste_elem.findtext('paste_key', ''),
-            'title': paste_elem.findtext('paste_title', ''),
-            'date': int(paste_elem.findtext('paste_date', '0')),
-            'url': paste_elem.findtext('paste_url', ''),
+            'key': field(block, 'paste_key'),
+            'title': field(block, 'paste_title'),
+            'date': int(field(block, 'paste_date', '0')),
+            'url': field(block, 'paste_url'),
         })
     pastes.sort(key=lambda p: p['date'], reverse=True)
     return pastes
