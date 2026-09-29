@@ -8,6 +8,8 @@ import sys
 import random
 import traceback
 import time
+import fcntl
+from contextlib import contextmanager
 from decimal import Decimal, getcontext
 
 from ikabot import config
@@ -57,10 +59,113 @@ ATTACK_LOG_FILE = r"/home/pi/log-attack-player"
 ATTACK_ACTIVE_CITIES = False
 
 
+# Cuantas veces se reintenta una ola que el servidor rechazó (falta de barcos/tropas)
+# antes de abortar la tarea.
+SEND_RETRIES = 3
+
+# =========================
+# LOCK ENTRE PROCESOS
+# =========================
+# Varias tareas AttackPlayer comparten la misma sesión del juego (misma "ciudad actual"
+# en el servidor) y la misma bolsa global de barcos. Este lock serializa las secciones
+# que cambian el contexto del servidor o consumen barcos, para que dos tareas en
+# paralelo no se pisen.
+_lock_file = None
+_lock_depth = 0
+
+
+@contextmanager
+def _attack_lock(session):
+    global _lock_file, _lock_depth
+    if _lock_depth == 0:
+        path = f"/tmp/ikabot_attack_{session.username}.lock"
+        _lock_file = open(path, "w")
+        fcntl.flock(_lock_file, fcntl.LOCK_EX)
+    _lock_depth += 1
+    try:
+        yield
+    finally:
+        _lock_depth -= 1
+        if _lock_depth == 0:
+            fcntl.flock(_lock_file, fcntl.LOCK_UN)
+            _lock_file.close()
+            _lock_file = None
+
+
+# =========================
+# COLA DE MISIONES
+# =========================
+# Si True, las tareas AttackPlayer se ejecutan de a una, en el orden en que fueron
+# lanzadas: una tarea hace TODAS sus olas antes de que empiece la siguiente.
+ATTACK_QUEUE = True
+
+
+def _pid_alive(pid):
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def _queue_update(session, fn):
+    """Lee la cola (lista de PIDs), descarta procesos muertos, aplica fn y la guarda."""
+    path = f"/tmp/ikabot_attack_{session.username}.queue"
+    with _attack_lock(session):
+        try:
+            with open(path) as f:
+                pids = [int(x) for x in f.read().split() if x.strip().isdigit()]
+        except FileNotFoundError:
+            pids = []
+        pids = fn([p for p in pids if _pid_alive(p)])
+        with open(path, "w") as f:
+            f.write("\n".join(str(p) for p in pids))
+        return pids
+
+
+def _queue_join(session):
+    me = os.getpid()
+    return _queue_update(session, lambda pids: pids if me in pids else pids + [me])
+
+
+def _queue_leave(session):
+    me = os.getpid()
+    try:
+        _queue_update(session, lambda pids: [p for p in pids if p != me])
+    except Exception:
+        pass
+
+
+def _queue_wait_turn(session):
+    notified = False
+    while True:
+        pids = _queue_join(session)
+        position = pids.index(os.getpid())
+        if position == 0:
+            return
+        if not notified:
+            attack_log(f"En cola de ataques: posición {position + 1} de {len(pids)}")
+            notified = True
+        session.setStatus(f"En cola de ataques: posición {position + 1} de {len(pids)}")
+        wait(30)
+
+
+def _ships_available(session):
+    # getAvailableShips() carga la URL base, lo que resetea la ciudad actual del servidor:
+    # por eso va bajo el lock.
+    with _attack_lock(session):
+        try:
+            return int(getAvailableShips(session))
+        except Exception:
+            return 0
+
+
 def attack_log(msg, level="INFO"):
     try:
         ts = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
-        line = f"[{ts}] [{level}] {msg}"
+        line = f"[{ts}] [{level}] [pid {os.getpid()}] {msg}"
         folder = os.path.dirname(ATTACK_LOG_FILE)
         if folder:
             os.makedirs(folder, exist_ok=True)
@@ -281,17 +386,94 @@ def filter_traveling(attacks, onlyCanAbort=True): return []
 def filter_fighting(attacks): return []
 
 
-def _wait_until_ships_full(session, origin_city_id, required_ships):
-    while True:
-        try:
-            current = int(getAvailableShips(session))
-        except Exception:
-            current = 0
+# Si no hay movimientos propios con barcos para calcular, cada cuánto se reconsulta
+NO_MOVEMENT_POLL_SECONDS = 300
+# Tope de cada espera calculada, por si un movimiento cambia (se aborta, etc.)
+MAX_SHIP_WAIT_SECONDS = 3600
 
-        if current >= int(required_ships):
+
+def _own_transport_movements(session):
+    """
+    Lee el asesor militar y devuelve (hora_servidor, [(eventTime, barcos, regresando)])
+    de los movimientos propios que llevan barcos de transporte. None si falla.
+    """
+    try:
+        with _attack_lock(session):
+            resp = session.get("view=militaryAdvisor&ajax=1")
+        data = json.loads(resp, strict=False)
+        server_time = int(data[0][1]["time"])
+        movements = []
+        for block in data:
+            if block[0] == "changeView":
+                movements = block[1][2]["viewScriptParams"]["militaryAndFleetMovements"]
+                break
+
+        result = []
+        for mv in movements:
+            if not mv.get("isOwnArmyOrFleet"):
+                continue
+            ships = sum(
+                int(str(s.get("amount", 0)).replace(",", "").replace(".", "") or 0)
+                for s in (mv.get("fleet") or {}).get("ships", [])
+                if s.get("cssClass") == "ship_transport"
+            )
+            if ships <= 0:
+                continue
+            returning = bool(mv.get("event", {}).get("isFleetReturning"))
+            result.append((int(mv["eventTime"]), ships, returning))
+        return server_time, result
+    except Exception as e:
+        attack_log(f"No se pudieron leer los movimientos: {e}", level="DEBUG")
+        return None
+
+
+def _seconds_until_ships(session, current, required):
+    """
+    Segundos hasta el próximo momento en que tiene sentido volver a consultar los barcos:
+    - la llegada del regreso con el que se juntan los barcos necesarios, o
+    - si con los regresos no alcanza, el próximo evento (ida o salto intermedio), para recalcular.
+    None si no hay movimientos propios con barcos.
+    """
+    info = _own_transport_movements(session)
+    if info is None:
+        return None
+    now, moves = info
+    if not moves:
+        return None
+
+    accumulated = current
+    for event_time, ships, returning in sorted(moves):
+        if not returning:
+            continue
+        accumulated += ships
+        if accumulated >= required:
+            return max(event_time - now, 0)
+
+    return max(min(m[0] for m in moves) - now, 0)
+
+
+def _wait_until_ships_full(session, origin_city_id, required_ships):
+    required = int(required_ships)
+    while True:
+        current = _ships_available(session)
+
+        if current >= required:
             return
 
-        wait(random.randint(10, 30))
+        seconds = _seconds_until_ships(session, current, required)
+        if seconds is None:
+            seconds = NO_MOVEMENT_POLL_SECONDS
+            attack_log(f"Barcos {current}/{required}: sin movimientos propios con barcos, se reconsulta en {seconds // 60} min")
+        else:
+            eta = seconds
+            seconds = min(seconds, MAX_SHIP_WAIT_SECONDS) + random.randint(10, 30)
+            capped = " (tope de espera)" if eta > MAX_SHIP_WAIT_SECONDS else ""
+            attack_log(
+                f"Barcos {current}/{required}: próximo evento en {eta // 60} min {eta % 60} s, "
+                f"próxima consulta en {seconds // 60} min {seconds % 60} s{capped}"
+            )
+
+        wait(seconds)
 
 
 def _is_inactive_grey(state):
@@ -337,9 +519,9 @@ def AttackPlayer(session, event, stdin_fd, predetermined_input):
         if not origin_city:
             return
 
-        _force_origin_city_context(session, origin_city["id"])
-
-        units_in_origin = get_units(session, origin_city)
+        with _attack_lock(session):
+            _force_origin_city_context(session, origin_city["id"])
+            units_in_origin = get_units(session, origin_city)
         #Para planificar ataques
         #if not units_in_origin:
         #    print(f"You don't have any land troops in {decodeUnicodeEscape(origin_city['name'])}!")
@@ -400,10 +582,7 @@ def AttackPlayer(session, event, stdin_fd, predetermined_input):
             unit_name = units_in_origin.get(unit_id, {}).get('name', unit_id)
             print(f"    - {unit_name}: {addThousandSeparator(qty)}")
         # Obtenemos el total disponible para mostrarlo en la pregunta
-        try:
-            available_ships = int(getAvailableShips(session))
-        except Exception:
-            available_ships = 0
+        available_ships = _ships_available(session)
 
         # Reasignamos la variable preguntando al usuario
         ATTACK_SHIPS = int(read(
@@ -439,6 +618,9 @@ def AttackPlayer(session, event, stdin_fd, predetermined_input):
         event.set()
 
     set_child_mode(session)
+    # Anotarse en la cola al confirmar, así el orden es el de lanzamiento
+    if ATTACK_QUEUE:
+        _queue_join(session)
     info = (
         f"\n?? Attacking {decodeUnicodeEscape(target_city['name'])} "
         f"{number_of_waves} times from {decodeUnicodeEscape(origin_city['name'])}"
@@ -452,14 +634,15 @@ def AttackPlayer(session, event, stdin_fd, predetermined_input):
             f"waves={number_of_waves} ships_per_wave={ATTACK_SHIPS}"
         )
 
+        if ATTACK_QUEUE:
+            _queue_wait_turn(session)
+            attack_log(f"Turno en la cola: comienza el ataque a {decodeUnicodeEscape(target_city['name'])}")
+
         same_island = str(origin_city.get('islandId', '')) == str(target_city.get('island_id', ''))
         attack_function = 'sendArmyPlunderLand' if same_island else 'sendArmyPlunderSea'
 
         #if not same_island:
         #    _wait_until_ships_full(session, origin_city["id"], ATTACK_SHIPS)
-        
-        session.setStatus(f"Esperando {ATTACK_SHIPS} barcos para iniciar la misión...")
-        _wait_until_ships_full(session, origin_city["id"], ATTACK_SHIPS)
         
         payload_base = {
             "action": "transportOperations",
@@ -484,8 +667,9 @@ def AttackPlayer(session, event, stdin_fd, predetermined_input):
         #        payload_base[f"cargo_army_{unit_id}_upkeep"] = UNIT_UPKEEP[unit_id]
 
         #Force context
-        _force_origin_city_context(session, origin_city["id"])
-        session.get(f"view=militaryAdvisor&cityId={origin_city['id']}&ajax=1", noIndex=True)
+        with _attack_lock(session):
+            _force_origin_city_context(session, origin_city["id"])
+            session.get(f"view=militaryAdvisor&cityId={origin_city['id']}&ajax=1", noIndex=True)
 
         last_delay = 0
 
@@ -524,44 +708,67 @@ def AttackPlayer(session, event, stdin_fd, predetermined_input):
                         sendToBot(session, msg_stop)
                     break
 
-            # 2. ESPERA DE BARCOS PRE-ATAQUE (La Ola 1 sale directo de tu puerto)
-            if wave_number > 1:
-                session.setStatus(f"Ola {wave_number}/{number_of_waves} enviada. Esperando regreso de barcos...")
+            # 2-4. ESPERA DE BARCOS + ENVÍO
+            # La espera es fuera del lock (puede durar mucho); el re-chequeo de barcos,
+            # el forzado de contexto y el POST van juntos bajo el lock, así otra tarea
+            # en paralelo no puede tomar los barcos ni cambiar la ciudad actual en el medio.
+            success = False
+            server_msg = ""
+            failed_attempts = 0
+            while True:
+                session.setStatus(f"Ola {wave_number}/{number_of_waves}: esperando {ATTACK_SHIPS} barcos...")
                 _wait_until_ships_full(session, origin_city["id"], ATTACK_SHIPS)
 
-            # 3. BLINDAJE ABSOLUTO DE CONTEXTO Y PAYLOAD
-            _force_origin_city_context(session, origin_city["id"])
-            
-            payload = dict(payload_base)
-            payload["cityId"] = str(origin_city['id'])
-            payload["currentCityId"] = str(origin_city['id'])
+                with _attack_lock(session):
+                    # Otra tarea pudo haber tomado los barcos entre la espera y el lock
+                    if _ships_available(session) < int(ATTACK_SHIPS):
+                        attack_log(f"WAVE {wave_number}/{number_of_waves}: otra tarea tomó los barcos, se vuelve a esperar")
+                        continue
 
-            # --- CORRECCIÓN CLAVE ---
-            # Refrescamos dinámicamente el token de seguridad con el último válido obtenido 
-            # tras forzar el contexto. Esto evita el autoretintento que mezcla las ciudades.
-            payload["actionRequest"] = config.actionRequest
+                    # 3. BLINDAJE ABSOLUTO DE CONTEXTO Y PAYLOAD
+                    _force_origin_city_context(session, origin_city["id"])
 
-            # Inyección íntegra de las tropas seleccionadas
-            for unit_id in ALL_POSSIBLE_ARMY_UNIT_GAME_IDS:
-                payload[f"cargo_army_{unit_id}"] = str(selected_units_payload.get(unit_id, 0))
-                if unit_id in UNIT_UPKEEP:
-                    payload[f"cargo_army_{unit_id}_upkeep"] = UNIT_UPKEEP[unit_id]
+                    payload = dict(payload_base)
+                    payload["cityId"] = str(origin_city['id'])
+                    payload["currentCityId"] = str(origin_city['id'])
 
-            # 4. ENVÍO DEL ATAQUE
-            session.setStatus(f"Enviando Ola {wave_number}/{number_of_waves}...")
-            response_data = session.post(params=payload)
-            response_json = json.loads(response_data, strict=False)
+                    # --- CORRECCIÓN CLAVE ---
+                    # Refrescamos dinámicamente el token de seguridad con el último válido obtenido
+                    # tras forzar el contexto. Esto evita el autoretintento que mezcla las ciudades.
+                    payload["actionRequest"] = config.actionRequest
 
-            success = True
-            server_msg = ""
+                    # Inyección íntegra de las tropas seleccionadas
+                    for unit_id in ALL_POSSIBLE_ARMY_UNIT_GAME_IDS:
+                        payload[f"cargo_army_{unit_id}"] = str(selected_units_payload.get(unit_id, 0))
+                        if unit_id in UNIT_UPKEEP:
+                            payload[f"cargo_army_{unit_id}_upkeep"] = UNIT_UPKEEP[unit_id]
 
-            for item in response_json:
-                if item[0] == 'provideFeedback' and item[1] and item[1][0].get('type') == 11:
-                    server_msg = re.sub('<[^<]+?>', ' ', item[1][0]['text']).strip()
-                    success = False
+                    # 4. ENVÍO DEL ATAQUE
+                    session.setStatus(f"Enviando Ola {wave_number}/{number_of_waves}...")
+                    response_data = session.post(params=payload)
+
+                response_json = json.loads(response_data, strict=False)
+
+                success = True
+                server_msg = ""
+                for item in response_json:
+                    if item[0] == 'provideFeedback' and item[1] and item[1][0].get('type') == 11:
+                        server_msg = re.sub('<[^<]+?>', ' ', item[1][0]['text']).strip()
+                        success = False
+                        break
+
+                attack_log(f"WAVE {wave_number}/{number_of_waves}: status={'SUCCESS' if success else 'FAILED'} server_msg={server_msg!r}")
+
+                if success:
                     break
-
-            attack_log(f"WAVE {wave_number}/{number_of_waves}: status={'SUCCESS' if success else 'FAILED'} server_msg={server_msg!r}")
+                failed_attempts += 1
+                if failed_attempts >= SEND_RETRIES:
+                    break
+                # Rechazo del servidor (p.ej. tropas todavía fuera): reintentar más tarde
+                retry_wait = random.randint(120, 300)
+                attack_log(f"WAVE {wave_number}/{number_of_waves}: reintento {failed_attempts}/{SEND_RETRIES - 1} en {retry_wait}s", level="WARN")
+                session.setStatus(f"Ola {wave_number}/{number_of_waves} rechazada, reintentando en {retry_wait // 60} min...")
+                wait(retry_wait)
 
             if not success:
                 unidades_enviadas = {k: v for k, v in selected_units_payload.items() if int(v) > 0}
@@ -583,8 +790,9 @@ def AttackPlayer(session, event, stdin_fd, predetermined_input):
                 _wait_until_ships_full(session, origin_city["id"], ATTACK_SHIPS)
 
                 # Paso B: Consultamos el listado de informes de guerra finalizados
-                _force_origin_city_context(session, origin_city["id"])
-                combat_list_data = session.get("view=militaryAdvisorCombatList&activeTab=tab_militaryAdvisorCombatList&ajax=1")
+                with _attack_lock(session):
+                    _force_origin_city_context(session, origin_city["id"])
+                    combat_list_data = session.get("view=militaryAdvisorCombatList&activeTab=tab_militaryAdvisorCombatList&ajax=1")
                 
                 enemy_dry = False
                 try:
@@ -706,6 +914,8 @@ def AttackPlayer(session, event, stdin_fd, predetermined_input):
         except Exception:
             pass
     finally:
+        if ATTACK_QUEUE:
+            _queue_leave(session)
         try:
             session.logout()
         except Exception:
