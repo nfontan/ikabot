@@ -88,6 +88,7 @@ def do_pirate_missions(
     maxRandomWaitingTime,
     piracyCities
 ):
+    cachedCityId = piracyCities[0]["id"] if piracyCities else None
     while pirateCount > 0:
         session.setStatus("Pirating for " + str(pirateCount) + " more runs")
         if pirateSchedule == True:
@@ -99,13 +100,22 @@ def do_pirate_missions(
             else:
                 pirateMissionChoice = pirateMissionDayChoice
         pirateCount -= 1
-        piracyCities = getPiracyCities(
-            session, pirateMissionChoice
-        )  # this is done again inside the loop in case the user destroys / creates another pirate fortress while this module is running
-        if piracyCities == []:
-            raise Exception(
-                "No city with pirate fortress capable of executing selected mission"
-            )
+        # Try the fortress city used last cycle first (a single request) instead of
+        # scanning every city every time; only fall back to the full scan (which also
+        # covers the user destroying/creating a pirate fortress mid-run) if that city
+        # no longer has a usable fortress.
+        cachedCity = None
+        if cachedCityId is not None:
+            cachedCity = getPiracyCityById(session, cachedCityId, pirateMissionChoice)
+        if cachedCity is not None:
+            piracyCities = [cachedCity]
+        else:
+            piracyCities = getPiracyCities(session, pirateMissionChoice)
+            if piracyCities == []:
+                raise Exception(
+                    "No city with pirate fortress capable of executing selected mission"
+                )
+        cachedCityId = piracyCities[0]["id"]
         html = session.post(
             city_url + str(piracyCities[0]["id"])
         )  # this is needed because for some reason you need to look at the town where you are sending a request from in the line below, before you send that request
@@ -120,88 +130,88 @@ def do_pirate_missions(
             pirateCount += 1  # don't count this as an iteration of the loop
             continue
 
-            url = "action=PiracyScreen&function=capture&buildingLevel={0}&view=pirateFortress&cityId={1}&position=17&activeTab=tabBootyQuest&backgroundView=city&currentCityId={1}&templateView=pirateFortress&actionRequest={2}&ajax=1".format(
-                piracyMissionToBuildingLevel[pirateMissionChoice],
-                piracyCities[0]["id"],
-                actionRequest,
-            )
-            html = session.post(url)
+        url = "action=PiracyScreen&function=capture&buildingLevel={0}&view=pirateFortress&cityId={1}&position=17&activeTab=tabBootyQuest&backgroundView=city&currentCityId={1}&templateView=pirateFortress&actionRequest={2}&ajax=1".format(
+            piracyMissionToBuildingLevel[pirateMissionChoice],
+            piracyCities[0]["id"],
+            actionRequest,
+        )
+        html = session.post(url)
 
-            if (
-                "function=createCaptcha" in html or "js_captchaImage" in html
-            ):
-                try:
-                    for i in range(20):
-                        session.setStatus("Resolving captcha " + str(i) + "/20")
-                        if i == 19:
-                            msg = "Failed to resolve captcha too many times, autoPirate has been terminated."
-                            sendToBot(session, msg)
-                            raise Exception("Failed to resolve captcha too many times")
-                        picture = extract_captcha_image(html)
-                        if picture is None:
-                            picture = session.get(
-                                "action=Options&function=createCaptcha",
-                                fullResponse=True,
-                            ).content
-                        captcha = resolveCaptcha(session, picture)
-                        if captcha == "Error":
-                            session.setStatus("Retrying captcha " + str(i + 1) + "/20")
-                            # The captcha could not be solved (local solver failed
-                            # or the remote API rejected the image). Wait a moment
-                            # and trigger a fresh capture request so we get a brand
-                            # new captcha (or restore the fortress context) instead
-                            # of re-trying against the same stale HTML.
-                            time.sleep(5)
-                            url = "action=PiracyScreen&function=capture&buildingLevel={0}&view=pirateFortress&cityId={1}&position=17&activeTab=tabBootyQuest&backgroundView=city&currentCityId={1}&templateView=pirateFortress&actionRequest={2}&ajax=1".format(
-                                piracyMissionToBuildingLevel[pirateMissionChoice],
-                                piracyCities[0]["id"],
-                                actionRequest,
-                            )
-                            html = session.post(url)
-                            if not (
-                                "function=createCaptcha" in html
-                                or "js_captchaImage" in html
-                            ):
-                                # the fortress is gone/not asking us for a captcha
-                                # anymore; let the outer logic decide what to do
-                                break
-                            continue
-                        session.setStatus("Got captcha: " + captcha)
-                        session.post(city_url + str(piracyCities[0]["id"]))
-                        params = {
-                            "action": "PiracyScreen",
-                            "function": "capture",
-                            "cityId": piracyCities[0]["id"],
-                            "position": "17",
-                            "captchaNeeded": "1",
-                            "buildingLevel": str(
-                                piracyMissionToBuildingLevel[pirateMissionChoice]
-                            ),
-                            "captcha": captcha,
-                            "activeTab": "tabBootyQuest",
-                            "backgroundView": "city",
-                            "currentCityId": piracyCities[0]["id"],
-                            "templateView": "pirateFortress",
-                            "actionRequest": actionRequest,
-                            "ajax": "1",
-                        }
-                        html = session.post(params=params, noIndex=True)
-                        if (
-                            '"showPirateFortressShip":1' in html
-                        ):  # if this is true, then the crew is still in the town, that means that the request didn't succeed
-                            time.sleep(5)
-                            continue
-                        break
-                except Exception:
-                    info = ""
-                    msg = "Error in:\n{}\nCause:\n{}".format(
-                        info, traceback.format_exc()
-                    )
-                    sendToBot(session, msg)
+        if (
+            "function=createCaptcha" in html or "js_captchaImage" in html
+        ):
+            try:
+                for i in range(20):
+                    session.setStatus("Resolving captcha " + str(i) + "/20")
+                    if i == 19:
+                        msg = "Failed to resolve captcha too many times, autoPirate has been terminated."
+                        sendToBot(session, msg)
+                        raise Exception("Failed to resolve captcha too many times")
+                    picture = extract_captcha_image(html)
+                    if picture is None:
+                        picture = session.get(
+                            "action=Options&function=createCaptcha",
+                            fullResponse=True,
+                        ).content
+                    captcha = resolveCaptcha(session, picture)
+                    if captcha == "Error":
+                        session.setStatus("Retrying captcha " + str(i + 1) + "/20")
+                        # The captcha could not be solved (local solver failed
+                        # or the remote API rejected the image). Wait a moment
+                        # and trigger a fresh capture request so we get a brand
+                        # new captcha (or restore the fortress context) instead
+                        # of re-trying against the same stale HTML.
+                        time.sleep(5)
+                        url = "action=PiracyScreen&function=capture&buildingLevel={0}&view=pirateFortress&cityId={1}&position=17&activeTab=tabBootyQuest&backgroundView=city&currentCityId={1}&templateView=pirateFortress&actionRequest={2}&ajax=1".format(
+                            piracyMissionToBuildingLevel[pirateMissionChoice],
+                            piracyCities[0]["id"],
+                            actionRequest,
+                        )
+                        html = session.post(url)
+                        if not (
+                            "function=createCaptcha" in html
+                            or "js_captchaImage" in html
+                        ):
+                            # the fortress is gone/not asking us for a captcha
+                            # anymore; let the outer logic decide what to do
+                            break
+                        continue
+                    session.setStatus("Got captcha: " + captcha)
+                    session.post(city_url + str(piracyCities[0]["id"]))
+                    params = {
+                        "action": "PiracyScreen",
+                        "function": "capture",
+                        "cityId": piracyCities[0]["id"],
+                        "position": "17",
+                        "captchaNeeded": "1",
+                        "buildingLevel": str(
+                            piracyMissionToBuildingLevel[pirateMissionChoice]
+                        ),
+                        "captcha": captcha,
+                        "activeTab": "tabBootyQuest",
+                        "backgroundView": "city",
+                        "currentCityId": piracyCities[0]["id"],
+                        "templateView": "pirateFortress",
+                        "actionRequest": actionRequest,
+                        "ajax": "1",
+                    }
+                    html = session.post(params=params, noIndex=True)
+                    if (
+                        '"showPirateFortressShip":1' in html
+                    ):  # if this is true, then the crew is still in the town, that means that the request didn't succeed
+                        time.sleep(5)
+                        continue
                     break
-            if autoConvert.lower() == "y":
-                convertCapturePoints(session, piracyCities, convertPerMission)
-            wait(piracyMissionWaitingTime[pirateMissionChoice], maxRandomWaitingTime)
+            except Exception:
+                info = ""
+                msg = "Error in:\n{}\nCause:\n{}".format(
+                    info, traceback.format_exc()
+                )
+                sendToBot(session, msg)
+                break
+        if autoConvert.lower() == "y":
+            convertCapturePoints(session, piracyCities, convertPerMission)
+        wait(piracyMissionWaitingTime[pirateMissionChoice], maxRandomWaitingTime)
 
 @configurator
 def autoPirate(session, event, stdin_fd, predetermined_input):
@@ -451,6 +461,30 @@ def resolveCaptcha(session, picture):
             time.sleep(5)
 
 
+def getPiracyCityById(session, city_id, pirateMissionChoice):
+    """Checks a single city for a pirate fortress capable of the given mission.
+    Parameters
+    ----------
+    session : ikabot.web.session.Session
+    city_id : str | int
+    pirateMissionChoice : str
+
+    Returns
+    -------
+    city : dict | None
+        the city (as returned by getCity) if it has a usable pirate fortress, None otherwise
+    """
+    html = session.get(city_url + str(city_id))
+    city = getCity(html)
+    for building in city["position"]:
+        if (
+            building["building"] == "pirateFortress"
+            and building["level"] >= piracyMissionToBuildingLevel[pirateMissionChoice]
+        ):
+            return city
+    return None
+
+
 def getPiracyCities(session, pirateMissionChoice):
     """Gets all user's cities which have a pirate fortress in them
     Parameters
@@ -464,16 +498,9 @@ def getPiracyCities(session, pirateMissionChoice):
     cities_ids = getIdsOfCities(session)[0]
     piracyCities = []
     for city_id in cities_ids:
-        html = session.get(city_url + city_id)
-        city = getCity(html)
-        for pos, building in enumerate(city["position"]):
-            if (
-                building["building"] == "pirateFortress"
-                and building["level"]
-                >= piracyMissionToBuildingLevel[pirateMissionChoice]
-            ):
-                piracyCities.append(city)
-                break
+        city = getPiracyCityById(session, city_id, pirateMissionChoice)
+        if city is not None:
+            piracyCities.append(city)
     return piracyCities
 
 

@@ -69,9 +69,15 @@ def updateProcessList(session, programprocesslist=[]):
             runningIkabotProcessList.append(process)
 
     # add new to the list and write to file only if it's given
+    # compare by pid, not by the whole dict: the caller's copy of a process
+    # (e.g. the freshly spawned "started" entry) can already be stale if the
+    # process itself updated its own status in the meantime, which would
+    # otherwise add a second, duplicate entry for the same pid
+    existing_pids = {p["pid"] for p in runningIkabotProcessList}
     for process in programprocesslist:
-        if process not in runningIkabotProcessList:
+        if process["pid"] not in existing_pids:
             runningIkabotProcessList.append(process)
+            existing_pids.add(process["pid"])
 
     # check if all proceses have new status field
     if len([p for p in runningIkabotProcessList if "status" not in p]) == len(
