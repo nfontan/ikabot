@@ -1240,6 +1240,10 @@ class Session:
         self.logger.info("__sessionExpired()")
         self.__backoff()
 
+        # another ikabot process may be renewing the session right now (forceRelogin)
+        if self.__reloggedByBot(self.s.cookies.get("PHPSESSID")):
+            return
+
         sessionData = self.getSessionData()
 
         try:
@@ -1300,6 +1304,135 @@ class Session:
                 self.__login(3)
             except Exception:
                 self.__sessionExpired()
+
+    def __reloggedByBot(self, sent_sessid):
+        """Called right before treating a lobby redirect as a session takeover by
+        another browser/device. If the PHPSESSID stored on disk differs from the
+        one the request was sent with, another ikabot process renewed the session
+        itself (forceRelogin), so the new cookies are adopted instead of closing
+        ikabot. While a forced relogin is still in progress the new cookies are
+        not on disk yet, so wait for them for a while.
+        Parameters
+        ----------
+        sent_sessid : str
+            PHPSESSID the failed request was sent with
+
+        Returns
+        -------
+        relogged : bool
+            True if the new cookies were adopted and the request can be retried
+        """
+        deadline = time.time() + 60
+        while True:
+            sessionData = self.getSessionData()
+            stored_sessid = sessionData.get("cookies", {}).get("PHPSESSID")
+            if stored_sessid and stored_sessid != sent_sessid:
+                self.logger.warning("Session renewed by another ikabot process, adopting the new cookies")
+                self.__getCookie(sessionData)
+                return True
+            started = sessionData.get("forcedReloginStarted", 0)
+            if time.time() - started < 120 and time.time() < deadline:
+                time.sleep(2)
+                continue
+            return False
+
+    def forceRelogin(self):
+        """Performs a fresh login into the world server through the lobby
+        (loginLink) even if the current cookies are still valid. A long running
+        bot otherwise keeps the same game session forever, so the game never
+        registers a new login (e.g. the "Log in to Ikariam" daily task).
+        The new cookies are saved to the session file: the other ikabot processes
+        pick them up before their next request (__checkCookie), or when a request
+        that was in flight hits the invalidated session (__reloggedByBot).
+        It never asks for input; if something fails the current session is kept.
+
+        Returns
+        -------
+        success : bool
+        """
+        self.logger.info("forceRelogin()")
+        sessionData = self.getSessionData()
+        auth_token = sessionData.get("shared", {}).get("lobby", {}).get("gf-token-production")
+        if not auth_token:
+            try:
+                auth_token = self.s.cookies.get("gf-token-production")
+            except Exception:
+                auth_token = None
+        if not auth_token:
+            self.logger.warning("forceRelogin: no lobby cookie available")
+            return False
+
+        new_s = requests.Session()
+        self.__update_proxy(obj=new_s, sessionData=sessionData)
+        new_s.cookies.set_cookie(
+            requests.cookies.create_cookie(
+                domain=".gameforge.com", name="gf-token-production", value=auth_token
+            )
+        )
+        new_s.headers.update(
+            {
+                "authority": "lobby.ikariam.gameforge.com",
+                "accept": "application/json",
+                "accept-encoding": "gzip, deflate, br",
+                "accept-language": self.accept_language,
+                "authorization": "Bearer " + auth_token,
+                "content-type": "application/json",
+                "origin": "https://lobby.ikariam.gameforge.com",
+                "referer": "https://lobby.ikariam.gameforge.com/{}/accounts".format(self.locale.replace('-', '_')),
+                "user-agent": self.user_agent,
+            }
+        )
+
+        def set_relogin_marker(value):
+            data = self.getSessionData()
+            data.pop("shared", None)
+            if value is None:
+                data.pop("forcedReloginStarted", None)
+            else:
+                data["forcedReloginStarted"] = value
+            self.setSessionData(data)
+
+        try:
+            if new_s.get("https://lobby.ikariam.gameforge.com/api/users/me").status_code != 200:
+                self.logger.warning("forceRelogin: lobby cookie is no longer valid")
+                return False
+            blackbox = getNewBlackBoxToken(self)
+            data = {
+                "server": {"language": self.login_servidor, "number": self.mundo},
+                "clickedButton": "account_list",
+                "id": self.account["id"],
+                "blackbox": blackbox,
+            }
+            # from here on the current game session may be invalidated
+            set_relogin_marker(time.time())
+            resp = new_s.post(
+                "https://lobby.ikariam.gameforge.com/api/users/me/loginLink", json=data
+            )
+            url = json.loads(resp.text).get("url", "")
+            if not re.search(r"https://s\d+-\w{2}\.ikariam\.gameforge\.com/index\.php\?", url):
+                self.logger.warning("forceRelogin: loginLink failed: {} {}".format(resp.status_code, resp.text))
+                set_relogin_marker(None)
+                return False
+            html = new_s.get(url, verify=config.do_ssl_verify).text
+        except Exception:
+            self.logger.error("forceRelogin failed", exc_info=True)
+            set_relogin_marker(None)
+            return False
+
+        if self.__isExpired(html) or "PHPSESSID" not in new_s.cookies:
+            self.logger.warning("forceRelogin: the new game session is not valid")
+            set_relogin_marker(None)
+            return False
+
+        sessionData = self.getSessionData()
+        sessionData.pop("shared", None)
+        sessionData.pop("forcedReloginStarted", None)
+        sessionData.pop("actionRequestToken", None)  # belongs to the old session
+        sessionData["cookies"] = dict(new_s.cookies.items())
+        self.setSessionData(sessionData)
+        self.__getCookie(sessionData)
+        self.logger.warning("forceRelogin: new game session in use")
+        return True
 
     def __token(self):
         """Generates a valid actionRequest token from the session, or reuses
@@ -1372,6 +1505,7 @@ class Session:
                     }
                 )
                 self.logger.debug(f"About to send: {str(self.requestHistory[-1])}")
+                sent_sessid = self.s.cookies.get("PHPSESSID")
                 response = self.s.get(
                     url, params=params, verify=config.do_ssl_verify, timeout=300, **kwargs
                 )
@@ -1388,17 +1522,28 @@ class Session:
                     location = response.headers.get('Location', '')
                     if 'lobby.ikariam.gameforge.com' in location:
                         self.logger.error(f"Redirected to lobby: {location}")
+                        if self.__reloggedByBot(sent_sessid):
+                            continue
                         self.__printSessionRotated()
                         sys.exit(1)
 
                 # session rotated, redirect followed by requests (final status 200)
-                for resp in response.history:
-                    if resp is not None and resp.status_code == 302:
-                        location = resp.headers.get('Location', '')
-                        if 'lobby.ikariam.gameforge.com' in location:
-                            self.logger.error(f"Redirected to lobby: {location}")
-                            self.__printSessionRotated()
-                            sys.exit(1)
+                lobby_location = next(
+                    (
+                        resp.headers.get('Location', '')
+                        for resp in response.history
+                        if resp is not None
+                        and resp.status_code == 302
+                        and 'lobby.ikariam.gameforge.com' in resp.headers.get('Location', '')
+                    ),
+                    None,
+                )
+                if lobby_location is not None:
+                    self.logger.error(f"Redirected to lobby: {lobby_location}")
+                    if self.__reloggedByBot(sent_sessid):
+                        continue
+                    self.__printSessionRotated()
+                    sys.exit(1)
 
                 # handle 404 processes
                 if response.status_code == 404:
@@ -1407,6 +1552,8 @@ class Session:
                         self.logger.error(f"404 Not Found received from Ikariam: {url}")
                         # Only expire session if the main entry point fails
                         if "index.php" in url:
+                            if self.__reloggedByBot(sent_sessid):
+                                continue
                             self.__printSessionRotated()
                             sys.exit(1)
                     else:
@@ -1421,6 +1568,8 @@ class Session:
                 if ignoreExpire is False:
                     assert self.__isExpired(html) is False
                 if self.__isSessionRotated(html):
+                    if self.__reloggedByBot(sent_sessid):
+                        continue
                     self.__printSessionRotated()
                     sys.exit(1)
                 # --- update developer runtime info ---
@@ -1502,6 +1651,7 @@ class Session:
                     }
                 )
                 self.logger.debug(f"About to send: {str(self.requestHistory[-1])}")
+                sent_sessid = self.s.cookies.get("PHPSESSID")
                 response = self.s.post(
                     url,
                     data=payloadPost,
@@ -1518,28 +1668,54 @@ class Session:
                 }
                 resp = response.text
 
+                def retry_with_new_session():
+                    # the actionRequest token belonged to the old session, start over
+                    return self.post(
+                        url=url_original,
+                        payloadPost=payloadPost_original,
+                        params=params_original,
+                        ignoreExpire=ignoreExpire,
+                        noIndex=noIndex,
+                        fullResponse=fullResponse,
+                        noQuery=noQuery,
+                        **kwargs,
+                    )
+
                 #  modifica redirect 302
                 if response.status_code == 302:
                     location = response.headers.get('Location', '')
                     if 'lobby.ikariam.gameforge.com' in location:
                         self.logger.error(f"Redirected to lobby: {location}")
+                        if self.__reloggedByBot(sent_sessid):
+                            return retry_with_new_session()
                         self.__printSessionRotated()
                         sys.exit(1)
 
                 # session rotated, redirect followed by requests (final status 200)
-                for resp_hist in response.history:
-                    if resp_hist is not None and resp_hist.status_code == 302:
-                        location = resp_hist.headers.get('Location', '')
-                        if 'lobby.ikariam.gameforge.com' in location:
-                            self.logger.error(f"Redirected to lobby: {location}")
-                            self.__printSessionRotated()
-                            sys.exit(1)
+                lobby_location = next(
+                    (
+                        resp_hist.headers.get('Location', '')
+                        for resp_hist in response.history
+                        if resp_hist is not None
+                        and resp_hist.status_code == 302
+                        and 'lobby.ikariam.gameforge.com' in resp_hist.headers.get('Location', '')
+                    ),
+                    None,
+                )
+                if lobby_location is not None:
+                    self.logger.error(f"Redirected to lobby: {lobby_location}")
+                    if self.__reloggedByBot(sent_sessid):
+                        return retry_with_new_session()
+                    self.__printSessionRotated()
+                    sys.exit(1)
 
                 # handle 404 processes
                 if response.status_code == 404:
                     # If the POST was to Ikariam and failed, it's a session issue
                     if self.host in url:
                         self.logger.error(f"404 Not Found received from Ikariam POST: {url}")
+                        if self.__reloggedByBot(sent_sessid):
+                            return retry_with_new_session()
                         self.__printSessionRotated()
                         sys.exit(1)
                     else:
@@ -1554,6 +1730,8 @@ class Session:
                 if ignoreExpire is False:
                     assert self.__isExpired(resp) is False
                 if self.__isSessionRotated(resp):
+                    if self.__reloggedByBot(sent_sessid):
+                        return retry_with_new_session()
                     self.__printSessionRotated()
                     sys.exit(1)
                 if "TXT_ERROR_WRONG_REQUEST_ID" in resp:

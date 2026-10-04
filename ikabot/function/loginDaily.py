@@ -154,8 +154,55 @@ TASK_FUNCTIONS = {
 }
 
 
+def relogin_if_new_period(session, city_id, state):
+    """The bot keeps the same game session for as long as it runs, so the game
+    never registers a new login and the "Log in to Ikariam" daily task stays
+    pending. This logs in again (session.forceRelogin) once per daily tasks period.
+    Parameters
+    ----------
+    session : ikabot.web.session.Session
+    city_id : int
+    state : dict
+        keeps the period already handled ("period") and the period whose failure
+        was already notified ("notified") between calls
+
+    Returns
+    -------
+    countdown : tuple(str, int) or None
+        (current period, seconds until the daily tasks reset), None if unknown
+    """
+    html = session.post(
+        f"view=dailyTasks&backgroundView=city&currentCityId={city_id}&actionRequest={actionRequest}&ajax=1"
+    )
+    match = re.search(
+        r'"dailyTasksCountdown":{"countdown":{"enddate":(\d+),"currentdate":(\d+)', html
+    )
+    if match is None:
+        return None
+    period = match.group(1)
+    if period != state.get("period"):
+        if session.forceRelogin():
+            state["period"] = period
+            wait(5)
+        elif state.get("notified") != period:
+            sendToBot(
+                session,
+                "Could not log in again for the daily login task, the current session is kept. Check the log for details.",
+            )
+            state["notified"] = period
+    return period, int(match.group(1)) - int(match.group(2))
+
+
 @task("loginDaily")
-def do_it(session, wine_city, wood_city, luxury_city, favour_tasks, collect_ambrosia):
+def do_it(
+    session,
+    wine_city,
+    wood_city,
+    luxury_city,
+    favour_tasks,
+    collect_ambrosia,
+    daily_relogin=False,
+):
     """
     Parameters
     ----------
@@ -165,10 +212,13 @@ def do_it(session, wine_city, wood_city, luxury_city, favour_tasks, collect_ambr
     luxury_city : dict
     favour_tasks : list
     collect_ambrosia : bool
+    daily_relogin : bool
+        log in again once per day so the "Log in to Ikariam" daily task is completed
     """
     info = "\nI enter every day\n"
     setInfoSignal(session, info)
     message_sent = False
+    relogin_state = {}
     
     while True:
         try:
@@ -358,6 +408,10 @@ def do_it(session, wine_city, wood_city, luxury_city, favour_tasks, collect_ambr
 
             wait(1)
 
+            # log in again once per daily tasks period, before collecting the favour
+            if daily_relogin:
+                relogin_if_new_period(session, wine_city["id"], relogin_state)
+
             # do favour tasks in wine city
             for task_name in favour_tasks:
                 if task_name not in TASK_FUNCTIONS:
@@ -441,6 +495,7 @@ def loginDaily(session, event, stdin_fd, predetermined_input):
     luxury_city = None
     favour_tasks = []
     collect_ambrosia = False
+    daily_relogin = False
 
     print("Choose the city where the daily login bonus wine will be sent:")
     wine_city = chooseCity(session)
@@ -497,6 +552,13 @@ def loginDaily(session, event, stdin_fd, predetermined_input):
 
         modify_tasks()
 
+    print(
+        "Do you want to log in again once per day, so the 'Log in to Ikariam' daily task gets completed? (Y|N)"
+    )
+    choice = read(values=["y", "Y", "n", "N"])
+    if choice in ["y", "Y"]:
+        daily_relogin = True
+
     print("I will do the thing.")
     enter()
 
@@ -507,4 +569,74 @@ def loginDaily(session, event, stdin_fd, predetermined_input):
         "luxury_city": luxury_city,
         "favour_tasks": favour_tasks,
         "collect_ambrosia": collect_ambrosia,
+        "daily_relogin": daily_relogin,
     }
+
+
+@task("dailyRelogin")
+def do_relogin(session):
+    """
+    Parameters
+    ----------
+    session : ikabot.web.session.Session
+    """
+    info = "\nI log in again every day\n"
+    setInfoSignal(session, info)
+    state = {}
+    while True:
+        try:
+            (ids, cities) = getIdsOfCities(session)
+            countdown = relogin_if_new_period(session, ids[0], state)
+            if countdown is None:
+                sec_to_wait = 60 * 60  # could not read the daily tasks countdown
+            elif state.get("period") != countdown[0]:
+                sec_to_wait = 30 * 60  # the login failed, retry
+            else:
+                sec_to_wait = max(countdown[1], 0) + 60  # just after the reset
+            session.setStatus(
+                f"Last check @{getDateTime()}, next login @{getDateTime(time.time() + sec_to_wait)}"
+            )
+            wait(sec_to_wait, 120)
+        except Exception:
+            msg = "Error in:\n{}\nCause:\n{}".format(info, traceback.format_exc())
+            sendToBot(session, msg)
+            wait(20 * 60, 20)  # wait 20 minutes before retrying if there's an error
+
+
+@configurator
+def dailyRelogin(session, event, stdin_fd, predetermined_input):
+    """
+    Parameters
+    ----------
+    session : ikabot.web.session.Session
+    event : multiprocessing.Event
+    stdin_fd: int
+    predetermined_input : multiprocessing.managers.SyncManager.list
+    """
+    banner()
+    print(
+        "I will log in again now and then once per day, right after the daily tasks reset, so the 'Log in to Ikariam' daily task gets completed."
+    )
+    print("The other running tasks will keep working with the new session.")
+    enter()
+    return {"session": session}
+
+
+@configurator
+def reloginNow(session, event, stdin_fd, predetermined_input):
+    """
+    Parameters
+    ----------
+    session : ikabot.web.session.Session
+    event : multiprocessing.Event
+    stdin_fd: int
+    predetermined_input : multiprocessing.managers.SyncManager.list
+    """
+    banner()
+    print("Logging in again, please wait...")
+    if session.forceRelogin():
+        print("Done, the new session is in use. The other running tasks will keep working with it.")
+    else:
+        print("Could not log in again, the current session is kept. Check the log for details.")
+    enter()
+    return None
