@@ -31,7 +31,7 @@ from ikabot.function.importExportCookie import importExportCookie
 from ikabot.function.research import research
 from ikabot.function.consolidateResources import consolidateResources
 from ikabot.function.killTasks import killTasks
-from ikabot.function.loginDaily import loginDaily
+from ikabot.function.loginDaily import dailyRelogin, loginDaily, reloginNow
 from ikabot.function.logs import logs
 from ikabot.function.proxyConf import proxyConf, show_proxy
 from ikabot.function.searchForIslandSpaces import searchForIslandSpaces
@@ -129,7 +129,9 @@ def menu(session, checkUpdate=True):
         3: distributeResources,
         4: getStatus,
         5: activateShrine,
-        6: loginDaily,
+        601: loginDaily,
+        602: dailyRelogin,
+        603: reloginNow,
         701: alertAttacks,
         702: alertLowWine,
         801: buyResources,
@@ -203,6 +205,20 @@ def menu(session, checkUpdate=True):
     # refresh main menu on hitting enter
     if selected == '':
         return menu(session)
+
+    if selected == 6:
+        banner()
+        print("(0) Back")
+        print("(1) Login daily (all daily bonuses and tasks)")
+        print("(2) Log in again once per day only")
+        print("(3) Log in again now")
+
+        selected = read(min=0, max=3, digit=True)
+        if selected == 0:
+            menu(session)
+            return
+        if selected > 0:
+            selected += 600
 
     if selected == 7:
         banner()
