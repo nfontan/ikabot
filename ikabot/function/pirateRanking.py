@@ -41,6 +41,7 @@ import sys
 import json
 import os
 import random
+import tempfile
 import time
 import hashlib
 import requests
@@ -456,7 +457,10 @@ def do_it(session, save_file=True, send_telegram=False, send_pastebin=False, pas
         account_label = session.username if hasattr(session, 'username') and session.username else "account"
         safe_label = re.sub(r'[^A-Za-z0-9_-]+', '_', account_label)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        report_path = "/tmp/pirate_ranking_report_{}_{}.txt".format(safe_label, timestamp)
+        report_path = os.path.join(
+            tempfile.gettempdir(),
+            "pirate_ranking_report_{}_{}.txt".format(safe_label, timestamp),
+        )
         with open(report_path, "w", encoding="utf-8") as f:
             f.write(report_content)
         print("Report saved to: {}".format(report_path))
