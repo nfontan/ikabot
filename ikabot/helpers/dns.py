@@ -3,12 +3,50 @@
 
 from ikabot.helpers.logging import getLogger
 logger = getLogger(__name__)
+import re
 import socket
 import struct
 
 from ikabot.config import *
 from ikabot.helpers.process import run
 
+
+def addDefaultScheme(address):
+    """Returns the address as is if it already starts with http:// or https://
+    (as configured in the TXT record), otherwise prepends http:// (legacy records)."""
+    address = address.strip()
+    if re.match(r"^https?://", address, re.IGNORECASE):
+        return address
+    return "http://" + address
+
+
+def parseAddresses(raw):
+    """Splits the raw TXT value into a list of server addresses.
+    Several addresses can be configured separated by ',' or ';' (the first one has
+    priority). Each one may or may not include the scheme (http:// or https://).
+    Parameters
+    ----------
+    raw : str
+        TXT record value
+    Returns
+    -------
+    list[str]
+        server addresses, with scheme
+    """
+    addresses = []
+    for part in re.split(r"[,;]", raw):
+        part = part.strip().strip('"').strip()
+        if not part:
+            continue
+        address = addDefaultScheme(part).replace("/ikagod/ikabot", "").rstrip("/")
+        # address is either hostname, IPv4 or IPv6
+        if "." not in address and ":" not in re.sub(r"^https?://", "", address):
+            raise ValueError("Bad server address: " + address)
+        if address not in addresses:
+            addresses.append(address)
+    if not addresses:
+        raise ValueError("No server address found in: " + raw)
+    return addresses
 
 def getDNSTXTRecordWithSocket(domain, DNS_server="8.8.8.8"):
     """Returns the TXT record from the DNS server for the given domain
@@ -104,7 +142,7 @@ def getDNSTXTRecordWithSocket(domain, DNS_server="8.8.8.8"):
 
     query = build_query(domain)
     response = send_query(query)
-    return "http://" + parse_response(response)
+    return parse_response(response)
 
 
 def getDNSTXTRecordWithNSlookup(domain, DNS_server="8.8.8.8"):
@@ -127,7 +165,7 @@ def getDNSTXTRecordWithNSlookup(domain, DNS_server="8.8.8.8"):
         raise Exception(
             f'The command "nslookup -q=txt {domain} {DNS_server}" returned bad data: {text}'
         )
-    return "http://" + parts[1]
+    return parts[1]
 
 
 def getAddressWithSocket(domain):
@@ -178,8 +216,33 @@ def getAddressWithNSlookup(domain):
         raise e
 
 
-def getAddress(domain="ikagod.twilightparadox.com"):
-    """Makes multiple attempts to obtain the ikabot public API server address
+def getAddresses(domain=publicAPIServerDomain):
+    """Makes multiple attempts to obtain the ikabot public API server addresses
+    Parameters
+    ----------
+    domain : str
+        Domain name
+    Returns
+    -------
+    list[str]
+        server addresses in order of priority
+    """
+    custom_address = os.getenv("CUSTOM_API_ADDRESS")
+    if custom_address:
+        return parseAddresses(custom_address)
+    try:
+        return parseAddresses(getAddressWithSocket(domain))
+    except Exception as e:
+        logger.warning("Failed to obtain public API address from socket, falling back to nslookup: ", exc_info=True)
+    try:
+        return parseAddresses(getAddressWithNSlookup(domain))
+    except Exception as e:
+        logger.error("Failed to obtain public API address from both socket and nslookup: ", exc_info=True)
+        raise e
+
+
+def getAddress(domain=publicAPIServerDomain):
+    """Returns the main (first) ikabot public API server address
     Parameters
     ----------
     domain : str
@@ -189,23 +252,4 @@ def getAddress(domain="ikagod.twilightparadox.com"):
     str
         server address
     """
-    custom_address = os.getenv("CUSTOM_API_ADDRESS")
-    if custom_address:
-        return custom_address
-    try:
-        address = getAddressWithSocket(domain)
-        assert "." in address or ":" in address.replace("http://", ""), (
-            "Bad server address: " + address
-        )
-        return address.replace("/ikagod/ikabot", "")
-    except Exception as e:
-        logger.warning("Failed to obtain public API address from socket, falling back to nslookup: ", exc_info=True)
-    try:
-        address = getAddressWithNSlookup(domain)
-        assert "." in address or ":" in address.replace("http://", ""), (
-            "Bad server address: " + address
-        )  # address is either hostname, IPv4 or IPv6
-        return address.replace("/ikagod/ikabot", "")
-    except Exception as e:
-        logger.error("Failed to obtain public API address from both socket and nslookup: ", exc_info=True)
-        raise e
+    return getAddresses(domain)[0]
