@@ -21,12 +21,12 @@
 #
 # Scheduling:
 #   All accounts can be scheduled at the SAME time (e.g. everyone at 13:00).
-#   Right before touching the shared paste, each account acquires a small
-#   distributed lock (itself a dedicated Pastebin paste titled
-#   "<title> -- LOCK") so the read-append-create-delete cycle never overlaps
-#   between accounts; whoever gets there first holds the lock while it
-#   updates the paste, the rest wait their turn and retry. Manual staggering
-#   is no longer required.
+#   Right before touching the shared paste, each account acquires a lock file
+#   in the system temp dir (accounts run on the same machine) so the
+#   read-append-create-delete cycle never overlaps between accounts; whoever
+#   gets there first holds the lock while it updates the paste, the rest wait
+#   their turn and retry. The lock costs no Pastebin requests. Manual
+#   staggering is no longer required.
 #
 # Configuration per account:
 #   pastebin_dev_key        API developer key (get it at https://pastebin.com/doc_api)
@@ -600,76 +600,47 @@ def pastebin_delete(api_dev_key, api_user_key, paste_key):
     return resp.text.strip()
 
 
-def pastebin_acquire_lock(api_dev_key, api_user_key, title, timeout=900, poll_interval=(5, 15)):
-    """
-    Acquire a simple distributed lock so several accounts scheduled at the
-    same time don't race each other's read-append-create-delete cycle on the
-    shared paste. The lock itself is a dedicated Pastebin paste titled
-    "<title> -- LOCK": whoever manages to be the sole/oldest holder of that
-    paste owns the lock; everyone else polls and retries.
+def _local_lock_path(title):
+    digest = hashlib.md5(title.encode("utf-8")).hexdigest()[:10]
+    return os.path.join(tempfile.gettempdir(), "pirate_ranking_{}.lock".format(digest))
 
-    Pastebin's API gives no atomic "create if not exists", so two accounts
-    can still both create a lock paste in the same instant - if that happens,
-    only the older one (by paste_date, tie-broken by paste_key) keeps it and
-    the other deletes its own attempt and retries.
+
+def pastebin_acquire_lock(title, timeout=900, poll_interval=(2, 5)):
+    """
+    Acquire a lock shared by every ikabot account running on this machine, so
+    accounts scheduled at the same time don't race each other's
+    read-append-create-delete cycle on the shared paste. It is a plain file in
+    the system temp dir, created atomically (O_EXCL): whoever creates it owns
+    the lock, everyone else polls and retries. No Pastebin requests involved.
 
     Returns True once acquired, False if `timeout` seconds passed without it.
     """
-    lock_title = title + " -- LOCK"
-    holder_id = "{}-{}".format(os.getpid(), int(time.time() * 1000))
+    path = _local_lock_path(title)
     deadline = time.time() + timeout
     while time.time() < deadline:
-        pastes = pastebin_list_pastes(api_dev_key, api_user_key)
-        locks = [p for p in pastes if p['title'] == lock_title]
-
-        # A lock older than 10 minutes means its holder almost certainly
-        # crashed mid-update instead of releasing it; clear it out so we
-        # don't wait on a dead process forever.
-        stale_cutoff = time.time() - 600
-        stale_locks = [p for p in locks if p['date'] < stale_cutoff]
-        active_locks = [p for p in locks if p['date'] >= stale_cutoff]
-        for p in stale_locks:
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(fd, str(os.getpid()).encode())
+            os.close(fd)
+            return True
+        except FileExistsError:
+            # A lock older than 10 minutes means its holder almost certainly
+            # crashed mid-update; clear it so we don't wait on a dead process.
             try:
-                pastebin_delete(api_dev_key, api_user_key, p['key'])
-            except Exception:
+                if time.time() - os.path.getmtime(path) > 600:
+                    os.remove(path)
+                    continue
+            except OSError:
                 pass
-
-        if not active_locks:
-            try:
-                new_url = pastebin_create(api_dev_key, api_user_key, lock_title, holder_id, private=1)
-                our_key = new_url.rstrip('/').rsplit('/', 1)[-1]
-            except Exception:
-                time.sleep(random.uniform(*poll_interval))
-                continue
-
-            # Give Pastebin's listing a moment to catch up, then check
-            # whether anyone else grabbed the lock in the same instant.
-            time.sleep(1.5)
-            pastes = pastebin_list_pastes(api_dev_key, api_user_key)
-            locks = [p for p in pastes if p['title'] == lock_title]
-            locks.sort(key=lambda p: (p['date'], p['key']))
-            if locks and locks[0]['key'] == our_key:
-                return True
-            # We lost the race - remove our attempt and retry.
-            try:
-                pastebin_delete(api_dev_key, api_user_key, our_key)
-            except Exception:
-                pass
-
         time.sleep(random.uniform(*poll_interval))
-
     return False
 
 
-def pastebin_release_lock(api_dev_key, api_user_key, title):
-    """Release the lock paste created by pastebin_acquire_lock."""
-    lock_title = title + " -- LOCK"
+def pastebin_release_lock(title):
+    """Release the lock file created by pastebin_acquire_lock."""
     try:
-        pastes = pastebin_list_pastes(api_dev_key, api_user_key)
-        for p in pastes:
-            if p['title'] == lock_title:
-                pastebin_delete(api_dev_key, api_user_key, p['key'])
-    except Exception:
+        os.remove(_local_lock_path(title))
+    except OSError:
         pass
 
 
@@ -682,10 +653,10 @@ def pastebin_append_or_create(api_dev_key, api_user_key, title, new_content, pri
     Guarded by pastebin_acquire_lock/pastebin_release_lock so several accounts
     scheduled at the same time queue up instead of racing each other.
     """
-    if not pastebin_acquire_lock(api_dev_key, api_user_key, title):
+    if not pastebin_acquire_lock(title):
         raise Exception(
-            "Timed out waiting for the shared Pastebin lock ('{} -- LOCK'); "
-            "another account may be stuck mid-update.".format(title)
+            "Timed out waiting for the local Pastebin lock file; "
+            "another account may be stuck mid-update."
         )
 
     try:
@@ -715,7 +686,7 @@ def pastebin_append_or_create(api_dev_key, api_user_key, title, new_content, pri
 
         return new_url
     finally:
-        pastebin_release_lock(api_dev_key, api_user_key, title)
+        pastebin_release_lock(title)
 
 
 def parse_ranking_from_html(html):
