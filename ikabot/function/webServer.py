@@ -401,36 +401,46 @@ def webServer(session, event, stdin_fd, predetermined_input, port=None):
 captcha_lock = threading.Lock()
 
 
+def solvePure(session, image):
+    from ikabot.helpers.piratesDecaptchaPure import get_captcha_string
+
+    return get_captcha_string(image)
+
+
+def solveOnnx(session, image):
+    import onnxruntime
+    from ikabot.helpers.piratesDecaptcha import get_captcha_string_onnx
+
+    return get_captcha_string_onnx(image)
+
+
+def solveApi(session, image):
+    from ikabot.helpers.apiComm import getPiratesCaptchaSolution
+
+    return getPiratesCaptchaSolution(session, image)
+
+
 def solveCaptchaImage(session, image):
-    """Solves a game captcha trying the pure python solver, then onnx, then the API.
+    """Solves a game captcha with the method set in WEBSERVER_DECAPTCHA_METHOD,
+    falling back to the other one.
 
     Returns
     -------
     (captcha, method) : tuple[str, str]
     """
-    try:
-        from ikabot.helpers.piratesDecaptchaPure import get_captcha_string
-
-        captcha = get_captcha_string(image)
-        if captcha:
-            return captcha, "pure"
-    except Exception:
-        pass
-    try:
-        import onnxruntime
-        from ikabot.helpers.piratesDecaptcha import get_captcha_string_onnx
-
-        captcha = get_captcha_string_onnx(image)
-        if captcha:
-            return captcha, "onnx"
-    except Exception:
-        pass
-    from ikabot.helpers.apiComm import getPiratesCaptchaSolution
-
-    captcha = getPiratesCaptchaSolution(session, image)
-    if not captcha:
-        raise Exception("Empty captcha solution")
-    return captcha, "api"
+    local = [("pure", solvePure), ("onnx", solveOnnx)]
+    api = [("api", solveApi)]
+    solvers = local + api if WEBSERVER_DECAPTCHA_METHOD == "local" else api + local
+    errors = []
+    for name, solver in solvers:
+        try:
+            captcha = solver(session, image)
+            if captcha:
+                return captcha, name
+            errors.append(f"{name}: empty solution")
+        except Exception as e:
+            errors.append(f"{name}: {e}")
+    raise Exception("; ".join(errors))
 
 
 def handleSolveCaptchaRequest(session, request):
