@@ -398,7 +398,64 @@ def webServer(session, event, stdin_fd, predetermined_input, port=None):
     }
 
 
+captcha_lock = threading.Lock()
+
+
+def solveCaptchaImage(session, image):
+    """Solves a game captcha trying the pure python solver, then onnx, then the API.
+
+    Returns
+    -------
+    (captcha, method) : tuple[str, str]
+    """
+    try:
+        from ikabot.helpers.piratesDecaptchaPure import get_captcha_string
+
+        captcha = get_captcha_string(image)
+        if captcha:
+            return captcha, "pure"
+    except Exception:
+        pass
+    try:
+        import onnxruntime
+        from ikabot.helpers.piratesDecaptcha import get_captcha_string_onnx
+
+        captcha = get_captcha_string_onnx(image)
+        if captcha:
+            return captcha, "onnx"
+    except Exception:
+        pass
+    from ikabot.helpers.apiComm import getPiratesCaptchaSolution
+
+    captcha = getPiratesCaptchaSolution(session, image)
+    if not captcha:
+        raise Exception("Empty captcha solution")
+    return captcha, "api"
+
+
+def handleSolveCaptchaRequest(session, request):
+    def reply(data):
+        return sys.flask.Response(
+            json.dumps(data), 200, {"Content-Type": "application/json"}
+        )
+
+    try:
+        image = base64.b64decode(request.form.get("image", ""))
+    except Exception:
+        image = b""
+    if image[:8] != b"\x89PNG\r\n\x1a\n":
+        return reply({"status": "error", "message": "Invalid captcha image"})
+    try:
+        with captcha_lock:
+            captcha, method = solveCaptchaImage(session, image)
+        return reply({"status": "ok", "captcha": captcha, "method": method})
+    except Exception as e:
+        return reply({"status": "error", "message": str(e)})
+
+
 def handleIkabotAPIRequest(session, request):
+    if request.args["action"] == "solveCaptcha":
+        return handleSolveCaptchaRequest(session, request)
     if request.args["action"] == "killTask":
         try:
             if isWindows:
@@ -526,6 +583,85 @@ window.onload = function() {{
 }}
 
 </style>
+"""
+
+# adds a button next to the piracy/demolition/abandon colony captcha input that
+# asks ikabot to solve the captcha, fills it in and submits the form
+custom_script += """
+<script>
+(function() {
+    function findCaptcha() {
+        var img = document.querySelector('#js_captchaImage, img.captchaImage, #demolitionForm img');
+        var input = document.querySelector('input#captcha');
+        if (!img || !input) return null;
+        var submit = null;
+        if (input.form) submit = input.form.querySelector('input[type="submit"], button[type="submit"]');
+        if (!submit) submit = document.querySelector('#pirateCaptureBox input.button[type="submit"]');
+        return {img: img, input: input, submit: submit};
+    }
+
+    function imageToBase64(img) {
+        if (img.src.indexOf('data:image/png;base64,') === 0) return img.src.split(',')[1];
+        var canvas = document.createElement('canvas');
+        canvas.width = img.naturalWidth;
+        canvas.height = img.naturalHeight;
+        canvas.getContext('2d').drawImage(img, 0, 0);
+        return canvas.toDataURL('image/png').split(',')[1];
+    }
+
+    function solve(button) {
+        var els = findCaptcha();
+        if (!els) return;
+        button.disabled = true;
+        button.value = 'Solving...';
+        var body = 'image=' + encodeURIComponent(imageToBase64(els.img));
+        fetch('/?ikabot=1&action=solveCaptcha', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+            body: body
+        }).then(function(r) { return r.json(); }).then(function(data) {
+            if (data.status !== 'ok') throw new Error(data.message);
+            els = findCaptcha() || els;
+            els.input.value = data.captcha;
+            els.input.dispatchEvent(new Event('input', {bubbles: true}));
+            els.input.dispatchEvent(new Event('change', {bubbles: true}));
+            button.value = data.captcha + ' (' + data.method + ')';
+            if (els.submit) els.submit.click();
+        }).catch(function(e) {
+            button.disabled = false;
+            button.value = 'Ikabot: retry';
+            button.title = String(e && e.message || e);
+        });
+    }
+
+    function addButton() {
+        var els = findCaptcha();
+        if (!els || document.getElementById('ikabotCaptchaButton')) return;
+        var button = document.createElement('input');
+        button.type = 'button';
+        button.id = 'ikabotCaptchaButton';
+        button.className = 'button';
+        button.value = 'Ikabot: solve';
+        button.title = 'Solve the captcha with ikabot and confirm';
+        button.style.marginLeft = '6px';
+        button.style.verticalAlign = 'middle';
+        button.onclick = function() { solve(button); };
+        els.input.insertAdjacentElement('afterend', button);
+    }
+
+    function start() {
+        var timer = null;
+        new MutationObserver(function() {
+            clearTimeout(timer);
+            timer = setTimeout(addButton, 200);
+        }).observe(document.body, {childList: true, subtree: true});
+        addButton();
+    }
+
+    if (document.body) start();
+    else document.addEventListener('DOMContentLoaded', start);
+})();
+</script>
 """
 
 tab_menu = """
