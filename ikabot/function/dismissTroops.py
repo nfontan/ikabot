@@ -2,12 +2,11 @@
 # -*- coding: utf-8 -*-
 
 import json
-import os
 import random
 import re
-import sys
 
 from ikabot.config import *
+from ikabot.helpers.decorators import configurator
 from ikabot.helpers.gui import *
 from ikabot.helpers.pedirInfo import getIdsOfCities, read
 from ikabot.helpers.varios import (
@@ -274,6 +273,7 @@ def readMultiSelection(total, allow_skip=False):
         print("Invalid option")
 
 
+@configurator
 def dismissTroops(session, event, stdin_fd, predetermined_input):
     """
     Fires (dismisses) troops and/or ships from the user's cities
@@ -285,204 +285,193 @@ def dismissTroops(session, event, stdin_fd, predetermined_input):
     stdin_fd: int
     predetermined_input : multiprocessing.managers.SyncManager.List
     """
-    sys.stdin = os.fdopen(stdin_fd)
-    config.predetermined_input = predetermined_input
-    try:
+    banner()
+
+    ids, cities = getIdsOfCities(session)
+
+    print("Choose which cities you want to dismiss troops/ships in:")
+    resources_abbreviations = {"1": "(W)", "2": "(M)", "3": "(C)", "4": "(S)"}
+    longest_city_name_length = max(
+        len(decodeUnicodeEscape(cities[city_id]["name"])) for city_id in ids
+    )
+    for i, city_id in enumerate(ids, start=1):
+        city_name = decodeUnicodeEscape(cities[city_id]["name"])
+        abbreviation = resources_abbreviations[
+            str(cities[city_id]["tradegood"])
+        ]
+        padding = " " * (longest_city_name_length - len(city_name) + 2)
+        print("({}) {}{}{}".format(i, city_name, padding, abbreviation))
+    print("(a) All cities")
+    print(
+        "\nEnter numbers separated by comma or space (e.g.: 1,3), or 'a' to pick every city:"
+    )
+    selection = readMultiSelection(len(ids))
+    selected_ids = [ids[index - 1] for index in selection]
+
+    banner()
+    include_spartans = (
+        read(
+            msg="Do you want to include Spartans? [y/N]",
+            values=["y", "Y", "n", "N", ""],
+        ).lower()
+        == "y"
+    )
+
+    banner()
+    print("(1) Troops")
+    print("(2) Ships")
+    troops = read(min=1, max=2, digit=True) == 1
+    category = "troops" if troops else "ships"
+
+    banner()
+    print("Reading garrisons...\n")
+    garrisons = {}
+    for city_id in selected_ids:
+        city_name = decodeUnicodeEscape(cities[city_id]["name"])
+        print("  Reading {}...".format(city_name))
+        session.get(city_url + str(city_id))
+        humanWait()
+        tab, units = getCategoryUnits(session, city_id, troops)
+        if not include_spartans:
+            units = [unit for unit in units if not isSpartan(unit)]
+        garrisons[city_id] = {"city_name": city_name, "tab": tab, "units": units}
+        humanWait()
+
+    if all(len(garrison["units"]) == 0 for garrison in garrisons.values()):
         banner()
-
-        ids, cities = getIdsOfCities(session)
-
-        print("Choose which cities you want to dismiss troops/ships in:")
-        resources_abbreviations = {"1": "(W)", "2": "(M)", "3": "(C)", "4": "(S)"}
-        longest_city_name_length = max(
-            len(decodeUnicodeEscape(cities[city_id]["name"])) for city_id in ids
-        )
-        for i, city_id in enumerate(ids, start=1):
-            city_name = decodeUnicodeEscape(cities[city_id]["name"])
-            abbreviation = resources_abbreviations[
-                str(cities[city_id]["tradegood"])
-            ]
-            padding = " " * (longest_city_name_length - len(city_name) + 2)
-            print("({}) {}{}{}".format(i, city_name, padding, abbreviation))
-        print("(a) All cities")
-        print(
-            "\nEnter numbers separated by comma or space (e.g.: 1,3), or 'a' to pick every city:"
-        )
-        selection = readMultiSelection(len(ids))
-        selected_ids = [ids[index - 1] for index in selection]
-
-        banner()
-        include_spartans = (
-            read(
-                msg="Do you want to include Spartans? [y/N]",
-                values=["y", "Y", "n", "N", ""],
-            ).lower()
-            == "y"
-        )
-
-        banner()
-        print("(1) Troops")
-        print("(2) Ships")
-        troops = read(min=1, max=2, digit=True) == 1
-        category = "troops" if troops else "ships"
-
-        banner()
-        print("Reading garrisons...\n")
-        garrisons = {}
-        for city_id in selected_ids:
-            city_name = decodeUnicodeEscape(cities[city_id]["name"])
-            print("  Reading {}...".format(city_name))
-            session.get(city_url + str(city_id))
-            humanWait()
-            tab, units = getCategoryUnits(session, city_id, troops)
-            if not include_spartans:
-                units = [unit for unit in units if not isSpartan(unit)]
-            garrisons[city_id] = {"city_name": city_name, "tab": tab, "units": units}
-            humanWait()
-
-        if all(len(garrison["units"]) == 0 for garrison in garrisons.values()):
-            banner()
-            print("No {} found in the selected cities.".format(category))
-            enter()
-            event.set()
-            return
-
-        banner()
-        print("Available {} per city:\n".format(category))
-        displayAvailableUnits(selected_ids, garrisons)
-
-        plan = []
-        for city_id in selected_ids:
-            garrison = garrisons[city_id]
-            present_units = garrison["units"]
-            if not present_units:
-                continue
-            print("\n{}:".format(garrison["city_name"]))
-            print(
-                "Choose which {} to dismiss (comma separated lets you choose multiple):".format(
-                    category
-                )
-            )
-            for i, unit in enumerate(present_units, start=1):
-                print(
-                    "({}) {} ({})".format(
-                        i, unit["name"], addThousandSeparator(unit["available"])
-                    )
-                )
-            print("(a) All")
-            print("(s) Skip this city")
-            selection = readMultiSelection(len(present_units), allow_skip=True)
-            chosen_units = [present_units[index - 1] for index in selection]
-
-            city_units = []
-            for unit in chosen_units:
-                amount = read(
-                    msg="{} ({} available): ".format(
-                        unit["name"], addThousandSeparator(unit["available"])
-                    ),
-                    min=0,
-                    max=unit["available"],
-                    digit=True,
-                    empty=True,
-                    default=0,
-                    additionalValues=["all", "half"],
-                )
-                if amount == "all":
-                    amount = unit["available"]
-                elif amount == "half":
-                    amount = unit["available"] // 2
-                if amount > 0:
-                    unit = dict(unit)
-                    unit["amount"] = amount
-                    city_units.append(unit)
-
-            if city_units:
-                plan.append(
-                    {
-                        "city_id": city_id,
-                        "city_name": garrison["city_name"],
-                        "tab": garrison["tab"],
-                        "units": city_units,
-                    }
-                )
-
-        if not plan:
-            banner()
-            print("Nothing to dismiss.")
-            enter()
-            event.set()
-            return
-
-        banner()
-        print("You are about to dismiss the following {}:\n".format(category))
-        total = 0
-        for entry in plan:
-            print("{}:".format(entry["city_name"]))
-            for unit in entry["units"]:
-                print(
-                    "  {}: {} (of {} available)".format(
-                        unit["name"],
-                        addThousandSeparator(unit["amount"]),
-                        addThousandSeparator(unit["available"]),
-                    )
-                )
-                total += unit["amount"]
-        print("\nTotal {} to dismiss: {}".format(category, addThousandSeparator(total)))
-
-        total_wipe = all(
-            unit["amount"] == unit["available"]
-            for entry in plan
-            for unit in entry["units"]
-        )
-
-        if total_wipe:
-            word = random.choice(CONFIRMATION_WORDS)
-            print(
-                "\nWARNING: this will dismiss ALL the selected {}. This cannot be undone.".format(
-                    category
-                )
-            )
-            confirmed = False
-            while not confirmed:
-                typed = read(msg='Type "{}" to confirm: '.format(word))
-                if typed == word:
-                    confirmed = True
-                    continue
-                retry = read(msg='Confirmation does not match. Try again? [y/N]')
-                if retry.lower() != "y":
-                    event.set()
-                    return
-
-        print("\nProceed? [y/N]")
-        response = read(values=["y", "Y", "n", "N", ""])
-        if response.lower() != "y":
-            event.set()
-            return
-
-        print("")
-        for entry in plan:
-            print("Dismissing {} in {}...".format(category, entry["city_name"]))
-            session.get(city_url + str(entry["city_id"]))
-            humanWait()
-            params = {
-                "action": "CityScreen",
-                "function": "fireUnits" if troops else "fireShips",
-                "cityId": str(entry["city_id"]),
-                "activeTab": entry["tab"],
-                "backgroundView": "city",
-                "currentCityId": str(entry["city_id"]),
-                "templateView": "garrisonEdit",
-                "actionRequest": actionRequest,
-                "ajax": "1",
-            }
-            for unit in entry["units"]:
-                params[unit["id"]] = unit["amount"]
-            session.post(params=params)
-            humanWait()
-
-        print("\n{} were dismissed.".format(category.capitalize()))
+        print("No {} found in the selected cities.".format(category))
         enter()
-        event.set()
-    except KeyboardInterrupt:
-        event.set()
-        return
+        return None
+
+    banner()
+    print("Available {} per city:\n".format(category))
+    displayAvailableUnits(selected_ids, garrisons)
+
+    plan = []
+    for city_id in selected_ids:
+        garrison = garrisons[city_id]
+        present_units = garrison["units"]
+        if not present_units:
+            continue
+        print("\n{}:".format(garrison["city_name"]))
+        print(
+            "Choose which {} to dismiss (comma separated lets you choose multiple):".format(
+                category
+            )
+        )
+        for i, unit in enumerate(present_units, start=1):
+            print(
+                "({}) {} ({})".format(
+                    i, unit["name"], addThousandSeparator(unit["available"])
+                )
+            )
+        print("(a) All")
+        print("(s) Skip this city")
+        selection = readMultiSelection(len(present_units), allow_skip=True)
+        chosen_units = [present_units[index - 1] for index in selection]
+
+        city_units = []
+        for unit in chosen_units:
+            amount = read(
+                msg="{} ({} available): ".format(
+                    unit["name"], addThousandSeparator(unit["available"])
+                ),
+                min=0,
+                max=unit["available"],
+                digit=True,
+                empty=True,
+                default=0,
+                additionalValues=["all", "half"],
+            )
+            if amount == "all":
+                amount = unit["available"]
+            elif amount == "half":
+                amount = unit["available"] // 2
+            if amount > 0:
+                unit = dict(unit)
+                unit["amount"] = amount
+                city_units.append(unit)
+
+        if city_units:
+            plan.append(
+                {
+                    "city_id": city_id,
+                    "city_name": garrison["city_name"],
+                    "tab": garrison["tab"],
+                    "units": city_units,
+                }
+            )
+
+    if not plan:
+        banner()
+        print("Nothing to dismiss.")
+        enter()
+        return None
+
+    banner()
+    print("You are about to dismiss the following {}:\n".format(category))
+    total = 0
+    for entry in plan:
+        print("{}:".format(entry["city_name"]))
+        for unit in entry["units"]:
+            print(
+                "  {}: {} (of {} available)".format(
+                    unit["name"],
+                    addThousandSeparator(unit["amount"]),
+                    addThousandSeparator(unit["available"]),
+                )
+            )
+            total += unit["amount"]
+    print("\nTotal {} to dismiss: {}".format(category, addThousandSeparator(total)))
+
+    total_wipe = all(
+        unit["amount"] == unit["available"]
+        for entry in plan
+        for unit in entry["units"]
+    )
+
+    if total_wipe:
+        word = random.choice(CONFIRMATION_WORDS)
+        print(
+            "\nWARNING: this will dismiss ALL the selected {}. This cannot be undone.".format(
+                category
+            )
+        )
+        confirmed = False
+        while not confirmed:
+            typed = read(msg='Type "{}" to confirm: '.format(word))
+            if typed == word:
+                confirmed = True
+                continue
+            retry = read(msg='Confirmation does not match. Try again? [y/N]')
+            if retry.lower() != "y":
+                return None
+
+    print("\nProceed? [y/N]")
+    response = read(values=["y", "Y", "n", "N", ""])
+    if response.lower() != "y":
+        return None
+
+    print("")
+    for entry in plan:
+        print("Dismissing {} in {}...".format(category, entry["city_name"]))
+        session.get(city_url + str(entry["city_id"]))
+        humanWait()
+        params = {
+            "action": "CityScreen",
+            "function": "fireUnits" if troops else "fireShips",
+            "cityId": str(entry["city_id"]),
+            "activeTab": entry["tab"],
+            "backgroundView": "city",
+            "currentCityId": str(entry["city_id"]),
+            "templateView": "garrisonEdit",
+            "actionRequest": actionRequest,
+            "ajax": "1",
+        }
+        for unit in entry["units"]:
+            params[unit["id"]] = unit["amount"]
+        session.post(params=params)
+        humanWait()
+
+    print("\n{} were dismissed.".format(category.capitalize()))
+    enter()
