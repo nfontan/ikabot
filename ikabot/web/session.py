@@ -1,7 +1,7 @@
 #! /usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-from ikabot.helpers.logging import getLogger
+from ikabot.helpers.logging import getLogger, setLoggedInPlayer
 import base64
 import datetime
 import getpass
@@ -12,6 +12,7 @@ import re
 import sys
 import time
 import traceback
+import urllib.parse
 from collections import deque
 
 import requests
@@ -20,9 +21,19 @@ from urllib3.exceptions import InsecureRequestWarning
 from ikabot import config
 from ikabot.config import *
 from ikabot.helpers.aesCipher import *
+from ikabot.helpers.sessionStorage import (
+    get_session_data,
+    set_session_data,
+    delete_session_data,
+    migrate_legacy_account,
+    get_saved_users,
+    get_user_file_path,
+    get_users_dir,
+    find_user_file_for_email,
+)
 from ikabot.helpers.botComm import *
 from ikabot.helpers.getJson import getCity
-from ikabot.helpers.gui import banner
+from ikabot.helpers.gui import banner, enter
 from ikabot.helpers.pedirInfo import read
 from ikabot.helpers.varios import getDateTime, lastloginTimetoString
 from ikabot.helpers.apiComm import getNewBlackBoxToken
@@ -35,6 +46,8 @@ class Session:
         self.logged = False
         self.blackbox = None
         self.api_user_agent = None
+        self.mail = None
+        self.password = None
         self.locale = config.IKABOT_LOCALE
         self.gf_lang = config.IKABOT_GF_LANG
         self.accept_language = config.build_accept_language(self.locale, self.gf_lang)
@@ -107,6 +120,87 @@ class Session:
 
     def __isExpired(self, html):
         return "index.php?logout" in html or '<a class="logout"' in html
+
+    def __isSessionRotated(self, html, response=None):
+        """Detects a session takeover by another device/browser via the actual
+        redirect/host, not by scanning page content (which false-positived on
+        ordinary pages containing normal marketing/cookie-banner strings)."""
+        if not isinstance(html, str):
+            return False
+        if re.search(
+            r'"reload"\s*,\s*\{\s*"link"\s*:\s*"https://lobby\.ikariam\.gameforge\.com',
+            html,
+        ):
+            return True
+        if response is not None:
+            try:
+                candidate_urls = [response.url] + [
+                    h.headers.get("Location", "") for h in response.history
+                ]
+                for candidate in candidate_urls:
+                    if (urllib.parse.urlsplit(candidate).hostname or "") == "lobby.ikariam.gameforge.com":
+                        return True
+            except Exception:
+                pass
+        return False
+
+    def __printSessionRotated(self):
+        if getattr(self, "_session_rotated_printed", False):
+            return
+        self._session_rotated_printed = True
+        msg = (
+            "\n"
+            "[ERROR] The bot's session has expired.\n"
+            "\n"
+            "If you logged into Ikariam from another browser or device, the bot's "
+            "session is closed automatically: it's not possible to keep both "
+            "sessions active at the same time.\n"
+            "\n"
+            "Alternatives:\n"
+            "  1) Use the Web Server module, which emulates the Ikariam web server "
+            "and lets you control the bot from a local URL.\n"
+            "  2) Export the browser cookies (or the other way around) from the "
+            "Settings > Import/Export cookies menu.\n"
+            "\n"
+            "At this point ikabot cannot log in again, so it will close once you "
+            "press [Enter].\n"
+        )
+        self.logger.error("Session expired: closing ikabot")
+        print(msg)
+        try:
+            enter()
+        except Exception:
+            pass
+        self.__closeIkabot()
+
+    def __closeIkabot(self):
+        """Terminates the whole ikabot application. Child processes cannot simply
+        call os._exit(1): the main menu process is blocked on event.wait() waiting
+        for the event that a killed child never fires, so it would hang forever.
+        If the parent process is another ikabot process (menu / webServer launcher),
+        terminate it as well. If we are the top-level menu process, the parent is
+        just the terminal/shell and is left alone."""
+        try:
+            import psutil
+            parent = psutil.Process(os.getppid())
+            parent_name = parent.name().lower()
+            is_python_like = parent_name.startswith("python") or "ikabot" in parent_name
+            if is_python_like:
+                parent_cmd = " ".join(parent.cmdline()).lower()
+                if "command_line" in parent_cmd or "ikabot" in parent_cmd:
+                    my_pid = os.getpid()
+                    for proc in parent.children(recursive=True):
+                        if proc.pid == my_pid:
+                            continue
+                        try:
+                            proc.terminate()
+                        except Exception:
+                            pass
+                    parent.terminate()
+                    parent.wait(timeout=5)
+        except Exception:
+            pass
+        os._exit(1)
 
     def isExpired(self, html):
         return self.__isExpired(html)
@@ -261,6 +355,21 @@ class Session:
             sys.exit("The provided gf-token-production cookie is invalid or expired\n")
         return auth_token
 
+    def __ask_password_if_needed(self):
+        """
+        If the user resumed a saved session without a password (empty mail /
+        saved account selection), asking it on the first prompt would defeat
+        the cookie-based login. But if the lobby cookie has expired we now do
+        need the real credentials to re-authenticate via mauth. Ask for them
+        only in that moment, and only in the parent process.
+        """
+        if not self.password and self.padre:
+            if not self.mail:
+                print("\nThe stored session has expired and no account mail was provided.")
+                self.mail = read(msg="Mail: ")
+            print("\nThe stored session has expired. Enter the password for '{}':".format(self.mail))
+            self.password = getpass.getpass("Password: ")
+
     def __load_new_blackbox_token(self, allow_lobby_cookie_fallback=False):
         try:
             if self.padre:
@@ -304,11 +413,46 @@ class Session:
             banner()
 
             self.mail = read(msg="Mail:")
+            entered_mail = self.mail
 
-            if len(config.predetermined_input) != 0:
-                self.password = config.predetermined_input.pop(0)
+            if not entered_mail:
+                # No mail provided (Enter/Enter). Never ask for a password:
+                # use the stored cookies from default_user.json, or if that
+                # does not exist but other accounts are saved, let the user
+                # pick one so its cookies are reused.
+                default_user_file = get_user_file_path("")
+                saved_users = get_saved_users()
+                if saved_users and not os.path.exists(default_user_file):
+                    if len(saved_users) == 1:
+                        selected = saved_users[0]
+                        print("\nNo default account found, using saved account: {}".format(selected))
+                    else:
+                        print("\nNo default account found. Select a saved account:")
+                        for i, user in enumerate(saved_users, start=1):
+                            print("  {}. {}".format(i, user))
+                        selected = saved_users[read(min=1, max=len(saved_users), digit=True) - 1]
+                    self.mail = selected
+                # Cookies are already stored, skip password prompt (unless we
+                # already learned the password during a previous retry)
+                if not self.password:
+                    self.password = ""
             else:
-                self.password = getpass.getpass("Password:")
+                # Mail was typed. If it matches a saved account, reuse its cookies
+                # instead of asking for a password.
+                matching_path, has_duplicates = find_user_file_for_email(entered_mail)
+                if matching_path:
+                    if has_duplicates:
+                        print("\n[Warning] '{}' is present in multiple session files. Using the most recently modified one.".format(entered_mail))
+                    self.password = ""
+                else:
+                    # No saved session for this mail
+                    print("\nNo saved session found for '{}'.".format(entered_mail))
+                    print("Check the files in: {}".format(get_users_dir()))
+                    print("If they are outdated or corrupted, delete them and log in manually.")
+                    if len(config.predetermined_input) != 0:
+                        self.password = config.predetermined_input.pop(0)
+                    else:
+                        self.password = getpass.getpass("Password:")
 
             banner()
 
@@ -319,6 +463,7 @@ class Session:
 
         self.s = requests.Session()
         self.cipher = AESCipher(self.mail, self.password)
+        migrate_legacy_account(self.mail, self.password, self.logger)
         self.logger.info("__login()")
 
         # test to see if the lobby cookie in the session file is valid, this will save time on login and will reduce use of blackbox token
@@ -334,6 +479,7 @@ class Session:
         if not self.__test_lobby_cookie():
 
             self.logger.warning("Getting new lobby cookie")
+            self.__ask_password_if_needed()
             blackbox_loaded = self.__load_new_blackbox_token(allow_lobby_cookie_fallback=True)
             if not blackbox_loaded:
                 auth_token = self.s.cookies["gf-token-production"]
@@ -863,6 +1009,7 @@ class Session:
             config.infoUser = "Server:{}".format(self.servidor)
             config.infoUser += ", World:{}".format(self.word)
             config.infoUser += ", Player:{}".format(self.username)
+            setLoggedInPlayer(self.username)
             banner()
 
         self.host = "s{}-{}.ikariam.gameforge.com".format(self.mundo, self.servidor)
@@ -901,11 +1048,23 @@ class Session:
             self.__update_proxy(obj=old_s, sessionData=sessionData)
             try:
                 # make a request to check the connection
-                html = old_s.get(self.urlBase, verify=config.do_ssl_verify).text
+                old_resp = old_s.get(self.urlBase, verify=config.do_ssl_verify)
+                html = old_resp.text
             except Exception:
                 self.__proxy_error()
 
             cookies_are_valid = self.__isExpired(html) is False
+            # A valid-looking response that is actually the session-rotation
+            # payload (or a 404) means the stored cookies belong to a session
+            # that another login (browser/device) already took over. In that
+            # case the bot should not reuse them: a fresh login will win the
+            # session back from the other device.
+            if cookies_are_valid and self.__isSessionRotated(html, response=old_resp):
+                self.logger.warning("Stored cookies were invalidated by another active session; performing a fresh login")
+                cookies_are_valid = False
+            if cookies_are_valid and old_resp.status_code == 404:
+                self.logger.warning("Stored cookies returned 404; performing a fresh login")
+                cookies_are_valid = False
             if cookies_are_valid:
                 self.logger.info("using old cookies")
                 used_old_cookies = True
@@ -1130,14 +1289,18 @@ class Session:
         if "proxy" in sessionData and sessionData["proxy"]["set"] is True:
             obj.proxies.update(sessionData["proxy"]["conf"])
         else:
-            obj.proxies.update({})
+            # update({}) wouldn't remove an already-set proxy; clear() does.
+            obj.proxies.clear()
 
     def __checkCookie(self):
         self.logger.info("__checkCookie()")
         sessionData = self.getSessionData()
 
         try:
-            if self.s.cookies["PHPSESSID"] != sessionData["cookies"]["PHPSESSID"]:
+            stored_ikariam = sessionData["cookies"].get("ikariam")
+            imported = getattr(self, "_stored_ikariam", None) != stored_ikariam
+            self._stored_ikariam = stored_ikariam
+            if imported or self.s.cookies["PHPSESSID"] != sessionData["cookies"]["PHPSESSID"]:
                 self.__getCookie(sessionData)
         except KeyError:
             try:
@@ -1146,14 +1309,30 @@ class Session:
                 self.__sessionExpired()
 
     def __token(self):
-        """Generates a valid actionRequest token from the session
+        """Generates a valid actionRequest token from the session, or reuses
+        the one already stored for this account/world/server if it has one
         Returns
         -------
         token : str
             a string representing a valid actionRequest token
         """
+        sessionData = self.getSessionData()
+        token = sessionData.get("actionRequestToken")
+        if token:
+            return token
         html = self.get()
-        return re.search(r'actionRequest"?:\s*"(.*?)"', html).group(1)
+        if self.__isSessionRotated(html):
+            self.__printSessionRotated()
+            sys.exit(1)
+        match = re.search(r'actionRequest"?:\s*"(.*?)"', html)
+        if match is None:
+            self.__printSessionRotated()
+            sys.exit(1)
+        token = match.group(1)
+        sessionData.pop("shared", None)
+        sessionData["actionRequestToken"] = token
+        self.setSessionData(sessionData)
+        return token
 
     def get(
         self, url='', params={}, ignoreExpire=False, noIndex=False, fullResponse=False, noQuery=False, **kwargs
@@ -1211,11 +1390,22 @@ class Session:
                 }
                 html = response.text
 
-               # modifica redirect 302
+                # modifica redirect 302
                 if response.status_code == 302:
                     location = response.headers.get('Location', '')
                     if 'lobby.ikariam.gameforge.com' in location:
-                        raise AssertionError("Redirect to lobby detected")
+                        self.logger.error(f"Redirected to lobby: {location}")
+                        self.__printSessionRotated()
+                        sys.exit(1)
+
+                # session rotated, redirect followed by requests (final status 200)
+                for resp in response.history:
+                    if resp is not None and resp.status_code == 302:
+                        location = resp.headers.get('Location', '')
+                        if 'lobby.ikariam.gameforge.com' in location:
+                            self.logger.error(f"Redirected to lobby: {location}")
+                            self.__printSessionRotated()
+                            sys.exit(1)
 
                 # handle 404 processes
                 if response.status_code == 404:
@@ -1224,7 +1414,8 @@ class Session:
                         self.logger.error(f"404 Not Found received from Ikariam: {url}")
                         # Only expire session if the main entry point fails
                         if "index.php" in url:
-                            raise AssertionError("404 Not Found on index.php - Session likely expired")
+                            self.__printSessionRotated()
+                            sys.exit(1)
                     else:
                         # Local Web Server or external 404 should not trigger re-login
                         self.logger.warning(f"Local/External 404 detected at: {url}. Ignoring.")
@@ -1236,6 +1427,9 @@ class Session:
                     raise requests.exceptions.ConnectionError  # repeat after 10 minutes
                 if ignoreExpire is False:
                     assert self.__isExpired(html) is False
+                if self.__isSessionRotated(html, response=response):
+                    self.__printSessionRotated()
+                    sys.exit(1)
                 # --- update developer runtime info ---
                 try:
                     self.dev_api_host = self.host
@@ -1335,14 +1529,26 @@ class Session:
                 if response.status_code == 302:
                     location = response.headers.get('Location', '')
                     if 'lobby.ikariam.gameforge.com' in location:
-                        raise AssertionError("Redirect to lobby detected")
+                        self.logger.error(f"Redirected to lobby: {location}")
+                        self.__printSessionRotated()
+                        sys.exit(1)
+
+                # session rotated, redirect followed by requests (final status 200)
+                for resp_hist in response.history:
+                    if resp_hist is not None and resp_hist.status_code == 302:
+                        location = resp_hist.headers.get('Location', '')
+                        if 'lobby.ikariam.gameforge.com' in location:
+                            self.logger.error(f"Redirected to lobby: {location}")
+                            self.__printSessionRotated()
+                            sys.exit(1)
 
                 # handle 404 processes
                 if response.status_code == 404:
                     # If the POST was to Ikariam and failed, it's a session issue
                     if self.host in url:
                         self.logger.error(f"404 Not Found received from Ikariam POST: {url}")
-                        raise AssertionError("404 Not Found - Session likely expired")
+                        self.__printSessionRotated()
+                        sys.exit(1)
                     else:
                         # Probably a request to the local web server's invalid route
                         self.logger.warning(f"Local 404 detected on POST: {url}. Ignoring.")
@@ -1354,14 +1560,23 @@ class Session:
                     raise requests.exceptions.ConnectionError  # repeat after 10 minutes
                 if ignoreExpire is False:
                     assert self.__isExpired(resp) is False
+                if self.__isSessionRotated(resp, response=response):
+                    self.__printSessionRotated()
+                    sys.exit(1)
                 if "TXT_ERROR_WRONG_REQUEST_ID" in resp:
-                    self.logger.warning("got TXT_ERROR_WRONG_REQUEST_ID, bad actionRequest")
+                    self.logger.info("got TXT_ERROR_WRONG_REQUEST_ID, bad actionRequest")
+                    sessionData = self.getSessionData()
+                    if sessionData.pop("actionRequestToken", None) is not None:
+                        sessionData.pop("shared", None)
+                        self.setSessionData(sessionData)
                     return self.post(
                         url=url_original,
                         payloadPost=payloadPost_original,
                         params=params_original,
                         ignoreExpire=ignoreExpire,
                         noIndex=noIndex,
+                        fullResponse=fullResponse,
+                        noQuery=noQuery,
                     )
                 # --- update developer runtime info ---
                 try:
@@ -1372,6 +1587,18 @@ class Session:
                     self.dev_gf_token = cookies.get("gf-token-production")
                 except Exception:
                     pass
+
+                # an action consumes the token and the response carries the next one
+                if "action" in payloadPost or "action" in params:
+                    new_token = re.search(r'actionRequest"?:\s*"(.*?)"', resp)
+                    sessionData = self.getSessionData()
+                    if new_token:
+                        sessionData.pop("shared", None)
+                        sessionData["actionRequestToken"] = new_token.group(1)
+                        self.setSessionData(sessionData)
+                    elif sessionData.pop("actionRequestToken", None) is not None:
+                        sessionData.pop("shared", None)
+                        self.setSessionData(sessionData)
 
                 return resp if not fullResponse else response
             except AssertionError:
@@ -1390,19 +1617,23 @@ class Session:
             os._exit(0)
 
     def setSessionData(self, sessionData, shared=False):
-        """Encrypts relevant session data and writes it to the .ikabot file
+        """Writes relevant session data to disk formatted as JSON (indent=2)
         Parameters
         ----------
         sessionData : dict
-            dictionary containing relevant session data, data is written to file using AESCipher.setSessionData
+            dictionary containing relevant session data
         shared : bool
-            Indicates if the new data should be shared among all accounts asociated with the user-password
+            Indicates if the new data should be shared among all accounts associated with the user-password
         """
-        self.cipher.setSessionData(self, sessionData, shared=shared)
+        set_session_data(self, sessionData, shared=shared)
 
     def getSessionData(self):
-        """Gets relevant session data from the .ikabot file"""
-        return self.cipher.getSessionData(self)
+        """Gets fresh session data from disk (hot-reloaded)"""
+        return get_session_data(self)
+
+    def deleteSessionData(self):
+        """Deletes session data for this user from disk"""
+        delete_session_data(self)
 
 
 def normal_get(url, params={}):

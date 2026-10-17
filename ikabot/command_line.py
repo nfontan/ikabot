@@ -53,9 +53,10 @@ from ikabot.function.testDiscordBot import testDiscordBot
 from ikabot.helpers.gui import *
 from ikabot.helpers.pedirInfo import read
 from ikabot.helpers.process import updateProcessList
+from ikabot.helpers.sessionStorage import init_storage
 from ikabot.web.session import *
 from ikabot.function.UpgradeUnits import UpgradeUnits
-from ikabot.function.modifyProduction import modifyProduction, modifyAcademyWorkers
+from ikabot.function.modifyProduction import modifyProduction, modifyAcademyWorkers, modifyTempleWorkers
 from ikabot.function.reorganizeCityBuildings import reorganizeCityBuildings
 from ikabot.function.UpgradeUnits import UpgradeUnits
 from ikabot.function.developer import developer
@@ -168,6 +169,7 @@ def menu(session, checkUpdate=True):
         2301: modifyProduction,
         2302: modifyAcademyWorkers,
         2303: tavernManager,
+        2304: modifyTempleWorkers,
         24: reorganizeCityBuildings,
     }
 
@@ -194,7 +196,7 @@ def menu(session, checkUpdate=True):
     print("(20) Dump / Monitor world")
     print("(21) Options / Settings")
     print("(22) Consolidate resources")
-    print("(23) Set Workers(Production-Academy-Tavern)")
+    print("(23) Set Workers(Production-Academy-Tavern-Temple)")
     print("(24) Reorganize city buildings")
 
     total_options = len(menu_actions) + 1
@@ -278,8 +280,9 @@ def menu(session, checkUpdate=True):
         print("(1) Production")
         print("(2) Academy")
         print("(3) Tavern")
+        print("(4) Temple")
 
-        selected = read(min=0, max=3, digit=True)
+        selected = read(min=0, max=4, digit=True)
         if selected == 0:
             menu(session)
             return
@@ -406,9 +409,7 @@ def menu(session, checkUpdate=True):
 def init():
     home = "USERPROFILE" if isWindows else "HOME"
     os.chdir(os.getenv(home))
-    if not os.path.isfile(ikaFile):
-        open(ikaFile, "w")
-        os.chmod(ikaFile, 0o600)
+    init_storage()
 
 
 def start():
