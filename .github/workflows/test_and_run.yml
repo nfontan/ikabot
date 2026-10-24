@@ -48,5 +48,6 @@ jobs:
     - name: Run ikabot
       shell: bash
       run: |
-        printf "\n\n\n" | python -m ikabot &> log.log || cat log.log
+        printf "\n\n\n" | python -X faulthandler -c "import faulthandler, runpy, sys; faulthandler.dump_traceback_later(60, exit=True); sys.argv = ['ikabot']; runpy.run_module('ikabot', run_name='__main__')" &> log.log || true
+        cat log.log
         grep "Obtaining new blackbox token, please wait..." log.log && exit 0 || exit 1
