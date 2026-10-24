@@ -48,6 +48,6 @@ jobs:
     - name: Run ikabot
       shell: bash
       run: |
-        printf "\n\n\n" | python -X faulthandler -c "import faulthandler, runpy, sys; faulthandler.dump_traceback_later(60, exit=True); sys.argv = ['ikabot']; runpy.run_module('ikabot', run_name='__main__')" &> log.log || true
-        cat log.log
+        # getpass reads the Windows console instead of stdin, so make it read the piped input
+        printf "\n\n\n" | python -c "import getpass, runpy, sys; getpass.getpass = lambda prompt='Password: ', stream=None: input(prompt); sys.argv = ['ikabot']; runpy.run_module('ikabot', run_name='__main__', alter_sys=True)" &> log.log || cat log.log
         grep "Obtaining new blackbox token, please wait..." log.log && exit 0 || exit 1
