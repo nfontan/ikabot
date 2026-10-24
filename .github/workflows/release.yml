@@ -138,6 +138,7 @@ jobs:
       packages: write
 
   publish_pypi:
+    if: false
     needs: [publish_release]
     name: Publish Python Package
     uses: ./.github/workflows/publish_pypi.yml
