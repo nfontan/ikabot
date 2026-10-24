@@ -11,7 +11,7 @@ on:
 jobs:
   build:
 
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     continue-on-error: ${{ endsWith(matrix.python-version, '-dev') }}
     strategy:
       matrix:
@@ -43,6 +43,7 @@ jobs:
       run: |
         python -m pytest tests/ikabot
     - name: Run ikabot
+      shell: bash
       run: |
         printf "\n\n\n" | python -m ikabot &> log.log || cat log.log
         grep "Obtaining new blackbox token, please wait..." log.log && exit 0 || exit 1
