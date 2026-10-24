@@ -1,0 +1,47 @@
+name: Docker Bench
+
+on:
+  push:
+    branches:
+      - ci-windows-docker-test
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Prepare old and new build contexts
+        run: |
+          git worktree add ../old ce83bb5
+          git worktree add ../new HEAD
+          docker pull -q python:3.12-slim
+
+      - name: Bench
+        run: |
+          bench() {
+            dir=$1; tag=$2
+            cd "$dir"
+            s=$(date +%s.%N)
+            docker build --no-cache -q -t "$tag" . > /dev/null
+            e=$(date +%s.%N)
+            cold=$(awk "BEGIN{printf \"%.1f\", $e - $s}")
+            echo "# bench" >> ikabot/helpers/dns.py
+            s=$(date +%s.%N)
+            docker build -q -t "$tag" . > /dev/null
+            e=$(date +%s.%N)
+            git checkout -q ikabot/helpers/dns.py
+            rebuild=$(awk "BEGIN{printf \"%.1f\", $e - $s}")
+            disk=$(docker images --format '{{.Size}}' "$tag")
+            smoke=$(echo "" | timeout 30 docker run --rm -i "$tag" 2>&1 | grep -q "7MMF" && echo ok || echo FAIL)
+            echo "| $tag | $cold s | $rebuild s | $disk | $smoke |" >> "$GITHUB_STEP_SUMMARY"
+            cd - > /dev/null
+          }
+          echo "| image | cold build | rebuild after code change | size | starts |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|---|---|---|" >> "$GITHUB_STEP_SUMMARY"
+          bench ../old ikabot:old
+          bench ../new ikabot:new
+          cat "$GITHUB_STEP_SUMMARY"

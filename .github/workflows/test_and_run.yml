@@ -7,13 +7,16 @@ on:
   push:
     branches:
       - master
+      - ci-windows-docker-test
 
 jobs:
   build:
 
     runs-on: ${{ matrix.os }}
     continue-on-error: ${{ endsWith(matrix.python-version, '-dev') }}
+    timeout-minutes: 15
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
         python-version: ['3.10', '3.11', '3.12', '3.13', '3.14']
