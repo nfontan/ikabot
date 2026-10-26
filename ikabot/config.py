@@ -42,6 +42,13 @@ DECAPTCHA_TIMING_LOG = False
 # getPiratesCaptchaSolution) for the pirates captcha.
 PIRATE_DECAPTCHA_LOCAL = True
 
+# Preferred solver for the web server captcha button: "api" (default) or
+# "local" (pure python, then onnxruntime if installed). The other one is used
+# as a fallback if the preferred one fails.
+WEBSERVER_DECAPTCHA_METHOD = (
+    os.getenv("WEBSERVER_DECAPTCHA_METHOD") or "api"
+).strip().lower()
+
 # Regional Settings
 # These environment variables can be set to match the user's browser region and
 # timezone when Gameforge rejects generated blackbox tokens.
