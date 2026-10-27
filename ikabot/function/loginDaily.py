@@ -156,8 +156,49 @@ TASK_FUNCTIONS = {
 }
 
 
+def relogin_if_login_task(session, city_id, state):
+    """The bot keeps the same game session for as long as it runs, so the game
+    never registers a new login. On the days the "Log in to Ikariam" daily task
+    (taskId 22) is pending, this logs in again once per daily tasks period.
+    Parameters
+    ----------
+    session : ikabot.web.session.Session
+    city_id : int
+    state : dict
+        keeps the period already handled ("period") and the period whose failure
+        was already notified ("notified") between calls
+    """
+    html = session.post(
+        f"view=dailyTasks&backgroundView=city&currentCityId={city_id}&actionRequest={actionRequest}&ajax=1"
+    )
+    login_task = re.search(r'"task_amount_22":"(\d+)"', html)
+    if login_task is None or login_task.group(1) != "0":
+        return  # not a login task day, or already done
+    match = re.search(r'"dailyTasksCountdown":{"countdown":{"enddate":(\d+)', html)
+    period = match.group(1) if match else None
+    if period is None or period == state.get("period"):
+        return
+    if session.forceRelogin():
+        state["period"] = period
+        wait(5)
+    elif state.get("notified") != period:
+        sendToBot(
+            session,
+            "Could not log in again for the 'Log in to Ikariam' daily task, the current session is kept. Check the log for details.",
+        )
+        state["notified"] = period
+
+
 @task("loginDaily")
-def do_it(session, wine_city, wood_city, luxury_city, favour_tasks, collect_ambrosia):
+def do_it(
+    session,
+    wine_city,
+    wood_city,
+    luxury_city,
+    favour_tasks,
+    collect_ambrosia,
+    daily_relogin=False,
+):
     """
     Parameters
     ----------
@@ -167,12 +208,15 @@ def do_it(session, wine_city, wood_city, luxury_city, favour_tasks, collect_ambr
     luxury_city : dict
     favour_tasks : list
     collect_ambrosia : bool
+    daily_relogin : bool
+        log in again on the days the "Log in to Ikariam" daily task is pending
     """
     info = "\nI enter every day\n"
     setInfoSignal(session, info)
     message_sent = False
     last_error_msg = None
-    
+    relogin_state = {}
+
     while True:
         try:
             (ids, cities) = getIdsOfCities(session)
@@ -362,6 +406,10 @@ def do_it(session, wine_city, wood_city, luxury_city, favour_tasks, collect_ambr
 
             wait(1)
 
+            # log in again if today's tasks include "Log in to Ikariam", before collecting the favour
+            if daily_relogin:
+                relogin_if_login_task(session, wine_city["id"], relogin_state)
+
             # do favour tasks in wine city
             for task_name in favour_tasks:
                 if task_name not in TASK_FUNCTIONS:
@@ -445,6 +493,7 @@ def loginDaily(session, event, stdin_fd, predetermined_input):
     luxury_city = None
     favour_tasks = []
     collect_ambrosia = False
+    daily_relogin = False
 
     print("Choose the city where the daily login bonus wine will be sent:")
     wine_city = chooseCity(session)
@@ -501,6 +550,13 @@ def loginDaily(session, event, stdin_fd, predetermined_input):
 
         modify_tasks()
 
+    print(
+        "Do you want to log in again on the days the 'Log in to Ikariam' daily task is available, so it gets completed? (Y|N)"
+    )
+    choice = read(values=["y", "Y", "n", "N"])
+    if choice in ["y", "Y"]:
+        daily_relogin = True
+
     print("I will do the thing.")
     enter()
 
@@ -511,6 +567,7 @@ def loginDaily(session, event, stdin_fd, predetermined_input):
         "luxury_city": luxury_city,
         "favour_tasks": favour_tasks,
         "collect_ambrosia": collect_ambrosia,
+        "daily_relogin": daily_relogin,
     }
 
 
