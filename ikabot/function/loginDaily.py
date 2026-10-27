@@ -512,6 +512,12 @@ def loginDaily(session, event, stdin_fd, predetermined_input):
     choice = read(values=["y", "Y", "n", "N"])
     if choice in ["y", "Y"]:
         collect_ambrosia = True
+    print(
+        "Do you want to log in again on the days the 'Log in to Ikariam' daily task is available, so it gets completed? (Y|N)"
+    )
+    choice = read(values=["y", "Y", "n", "N"])
+    if choice in ["y", "Y"]:
+        daily_relogin = True
     print("Do you want to collect the favour automatically? (Y|N)")
     choice = read(values=["y", "Y", "n", "N"])
     if choice in ["y", "Y"]:
@@ -531,6 +537,8 @@ def loginDaily(session, event, stdin_fd, predetermined_input):
                     print(i + 1, ") ", bcolors.BLUE, task_name, bcolors.ENDC)
                 else:
                     print(i + 1, ") ", bcolors.STONE, task_name, bcolors.ENDC)
+            if daily_relogin:
+                print(f"\n{bcolors.BLUE}Log in again on the days the 'Log in to Ikariam' task is available{bcolors.ENDC}")
             choice = read(
                 min=1,
                 max=len(TASK_FUNCTIONS),
@@ -549,13 +557,6 @@ def loginDaily(session, event, stdin_fd, predetermined_input):
             return modify_tasks()
 
         modify_tasks()
-
-    print(
-        "Do you want to log in again on the days the 'Log in to Ikariam' daily task is available, so it gets completed? (Y|N)"
-    )
-    choice = read(values=["y", "Y", "n", "N"])
-    if choice in ["y", "Y"]:
-        daily_relogin = True
 
     print("I will do the thing.")
     enter()
