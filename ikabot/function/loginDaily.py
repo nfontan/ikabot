@@ -512,3 +512,24 @@ def loginDaily(session, event, stdin_fd, predetermined_input):
         "favour_tasks": favour_tasks,
         "collect_ambrosia": collect_ambrosia,
     }
+
+
+@configurator
+def reloginNow(session, event, stdin_fd, predetermined_input):
+    """Logs in again now, so the game registers a new login (e.g. for the
+    "Log in to Ikariam" daily task). The other running tasks keep working
+    with the new session
+    Parameters
+    ----------
+    session : ikabot.web.session.Session
+    event : multiprocessing.Event
+    stdin_fd: int
+    predetermined_input : multiprocessing.managers.SyncManager.list
+    """
+    banner()
+    print("Logging in again, please wait...")
+    if session.forceRelogin():
+        print("Done, the new session is in use. The other running tasks will keep working with it.")
+    else:
+        print("Could not log in again, the current session is kept. Check the log for details.")
+    enter()
