@@ -17,6 +17,7 @@ The options and the values each task accepts are listed in [CLI Task Reference](
 | `--task=NAME` | The task to start, e.g. `alertAttacks`. The name is not case sensitive. |
 | `--config=JSON` | The task's settings, as a JSON object. Use `--config=@file.json` to read them from a file. Settings that are left out take their default value. |
 | `--batch=JSON` | Starts several tasks at once, see [Starting several tasks](#starting-several-tasks). Cannot be combined with `--task` or `--config`. |
+| `--cities` | Lists the account's cities with their ids instead of starting a task, see [Finding your city ids](#finding-your-city-ids). |
 | `--email=EMAIL` | The saved account to use. Not needed when only one account is saved. |
 | `--world=WORLD` | The world, e.g. `s301-en`, `s301` or the world name. Not needed when the account plays only one world. |
 | `--player=NAME` | The in-game player name. Needed when the lobby has several accounts on the same world. |
@@ -60,6 +61,27 @@ ikabot --task=alertAttacks --config=@alert.json
 ```
 
   Use `-Encoding ascii`: with `utf8`, PowerShell 5.1 adds a marker at the start of the file that breaks the JSON.
+
+## Finding your city ids
+
+Settings that point to a city take its id, which the menu does not show. `--cities` lists the cities of the account:
+
+```bash
+ikabot --world=s301-en --player=PlayerOne --cities
+```
+
+```json
+{"status": "ok", "email": "", "world": "s301-en", "username": "PlayerOne", "cities": [
+  {"id": "1111", "name": "Alpha", "coords": "50:60", "tradegood": "wine"},
+  {"id": "2222", "name": "Beta", "coords": "51:62", "tradegood": "sulfur"}
+]}
+```
+
+- `id` is the value to use in the config.
+- `coords` are the coordinates of the city's island, which `searchForIslandSpaces` accepts as `"50:60"`.
+- `tradegood` is the island's trade good: `wine`, `marble`, `crystal` or `sulfur`.
+
+The account is chosen like for a task. A config with a city that is not yours also answers with your cities and their ids.
 
 ## Saving the config of a running task
 

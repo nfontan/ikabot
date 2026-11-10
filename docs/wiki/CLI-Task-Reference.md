@@ -2,7 +2,7 @@
 
 The settings each task accepts when it is started from the command line. See [Command-line tasks](https://github.com/Ikabot-Collective/ikabot/wiki/Command-Line-Tasks) for how to start them.
 
-Settings without a default are required. The examples use bash quoting; on Windows PowerShell put the config in a file and use `--config=@file.json`.
+Settings without a default are required. City ids can be listed with `ikabot --cities` (see [Finding your city ids](https://github.com/Ikabot-Collective/ikabot/wiki/Command-Line-Tasks#finding-your-city-ids)). The examples use bash quoting; on Windows PowerShell put the config in a file and use `--config=@file.json`.
 
 | Task | Menu entry | Needs a config |
 |---|---|---|
@@ -12,6 +12,7 @@ Settings without a default are required. The examples use bash quoting; on Windo
 | [`autoPirate`](#autopirate) | Auto-Pirate | yes |
 | [`consolidateResources`](#consolidateresources) | Consolidate resources | yes |
 | [`donationBot`](#donationbot) | Donate > Donate automatically | yes |
+| [`loginDaily`](#logindaily) | Login daily | yes |
 | [`searchForIslandSpaces`](#searchforislandspaces) | Dump / Monitor world > Monitor islands | yes |
 | [`tavernManager`](#tavernmanager) | Set Workers > Tavern > Equilibrium mode | yes |
 | [`webServer`](#webserver) | Ikabot Web Server | no |
@@ -88,8 +89,8 @@ Does pirate missions from the pirate fortress, one after the other, and solves t
 | `pirateSchedule` | yes/no | `false` | Do a different mission by day and by night. Accepts `true`/`false` or `"y"`/`"n"`. |
 | `pirateMissionDayChoice` | number | — | The mission at daytime, `1` to `9`. Required with a schedule. |
 | `pirateMissionNightChoice` | number | — | The mission at night, `1` to `9`. Required with a schedule. |
-| `dayStart`, `dayEnd` | hour | `10`, `18` | Daytime hours, from `0` to `23`. |
-| `nightStart`, `nightEnd` | hour | `19`, `9` | Night hours, from `0` to `23`. Outside both ranges the task waits. |
+| `dayStart`, `dayEnd` | hour | `10`, `18` | Daytime hours, from `0` to `23`. Only used with a schedule. |
+| `nightStart`, `nightEnd` | hour | `19`, `9` | Night hours, from `0` to `23`. Outside both ranges the task waits. Only used with a schedule: without one, the task runs at any hour. |
 | `autoConvert` | yes/no | `false` | Convert capture points to crew strength after each mission. |
 | `convertPerMission` | number or `"all"` | `0` | Capture points to convert each time. |
 | `maxRandomWaitingTime` | number | `0` | Up to this many extra random seconds between missions. |
@@ -161,6 +162,29 @@ ikabot --task=donationBot --config='{"cities_dict": {"all": {"donation_type": "b
 ```
 
 Status: `Every 1440 min, last check 14:32 | Total donated: 25000`, and `Donated: 5000 | Total: 25000 @...` right after a donation.
+
+## loginDaily
+
+Logs in every day: collects the daily login bonus, watches the cinetheatre videos, does the daily favour tasks and collects the ambrosia fountain in the capital. It never sleeps more than 12 hours, so the login streak is not lost.
+
+| Setting | Type | Default | Values |
+|---|---|---|---|
+| `wine_city` | city id | — | The city that gets the daily bonus wine. The favour tasks are done from it. |
+| `wood_city` | city id | none | The city where the cinetheatre wood bonus video is watched. Leave it out to skip it. |
+| `luxury_city` | city id | none | The city where the cinetheatre luxury good bonus video is watched. Leave it out to skip it. The favour video is watched in this city, or in `wood_city`. |
+| `favour_tasks` | list or `"all"` | `[]` | The daily favour tasks to do and collect: `resource` (collect the favour of resource tasks), `look` (look at the highscore, the shop and the inventory), `online` (stay online for 30 minutes), `complete` (complete 2/all tasks). |
+| `collect_ambrosia` | yes/no | `false` | Watch the "Divine Imagination" ambrosia video. |
+
+The cities must be yours (`ikabot --cities` lists them). When the favour is full, the task sends one Telegram/Discord message and skips the favour tasks.
+
+```bash
+# only the daily bonus
+ikabot --task=loginDaily --config='{"wine_city": 1111}'
+# everything
+ikabot --task=loginDaily --config='{"wine_city": 1111, "wood_city": 2222, "luxury_city": 3333, "favour_tasks": "all", "collect_ambrosia": true}'
+```
+
+Status: `Last activity @2026-11-10_09-55-12, next activity @2026-11-10_21-55-12`, or `Waiting 55s to watch video for wood bonus` while a video plays.
 
 ## searchForIslandSpaces
 
