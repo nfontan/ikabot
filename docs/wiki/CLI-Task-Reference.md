@@ -16,6 +16,7 @@ Settings without a default are required. City ids can be listed with `ikabot --c
 | [`loginDaily`](#logindaily) | Login daily | yes |
 | [`research`](#research) | Research > Conduct experiment / Conduct automatically | no |
 | [`searchForIslandSpaces`](#searchforislandspaces) | Dump / Monitor world > Monitor islands | yes |
+| [`sendResources`](#sendresources) | Send resources | yes |
 | [`tavernManager`](#tavernmanager) | Set Workers > Tavern > Equilibrium mode | yes |
 | [`webServer`](#webserver) | Ikabot Web Server | no |
 
@@ -254,6 +255,36 @@ ikabot --task=searchForIslandSpaces --config='{"time": 3, "islandList": ["50:60"
 ```
 
 Status: `Checked islands [50:60,51:62] @ 14-32-05`.
+
+## sendResources
+
+Sends resources from your cities to other cities, yours or another player's. When there are not enough ships, it waits for them and sends the rest in several trips. The task ends when everything has been sent.
+
+| Setting | Type | Default | Values |
+|---|---|---|---|
+| `routes` | list | — | The shipments, in order. Each one is `{"from": ..., "to": ..., "resources": ...}`, see below. |
+| `useFreighters` | yes/no | `false` | Use freighters instead of trade ships. |
+
+Inside each route:
+
+| Setting | Values |
+|---|---|
+| `from` | The id of one of your cities. |
+| `to` | The id of the city that receives the resources. |
+| `resources` | 5 amounts in the order wood, wine, marble, crystal, sulfur (`[5000, 0, 2000, 0, 0]`), or an object with the ones to send (`{"wood": 5000, "marble": 2000}`). |
+| `island` | Only when `to` is another player's city: the id of its island, or its `"X:Y"` coordinates. The task checks that the city is on that island. |
+
+Like the menu, a city can only send what it has: the amounts of all the routes from the same city are added up and checked against its warehouse.
+`Alpha has 10.000 wood, the routes send 12.000`
+
+```bash
+# 5,000 wood and 2,000 marble between two of your cities
+ikabot --task=sendResources --config='{"routes": [{"from": 1111, "to": 2222, "resources": {"wood": 5000, "marble": 2000}}]}'
+# wine to another player's city on the island at 50:60, with freighters
+ikabot --task=sendResources --config='{"useFreighters": true, "routes": [{"from": 1111, "to": 9000, "island": "50:60", "resources": {"wine": 3000}}]}'
+```
+
+Status: ` Sending 5000W, 0V, 2000M, 0C, 0S | Alpha ---> Beta `.
 
 ## tavernManager
 
