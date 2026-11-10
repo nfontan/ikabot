@@ -1,8 +1,8 @@
 # CLI task reference
 
-The settings each task accepts when it is started from the command line. See [Command-line tasks](https://github.com/Ikabot-Collective/ikabot/wiki/Command-Line-Tasks) for how to start them.
+The settings each task accepts when it is started from the command line. See [Command-line tasks](Command-Line-Tasks) for how to start them.
 
-Settings without a default are required. City ids can be listed with `ikabot --cities` (see [Finding your city ids](https://github.com/Ikabot-Collective/ikabot/wiki/Command-Line-Tasks#finding-your-city-ids)). The examples use bash quoting; on Windows PowerShell put the config in a file and use `--config=@file.json`.
+Settings without a default are required. City ids can be listed with `ikabot --cities` (see [Finding your city ids](Command-Line-Tasks#finding-your-city-ids)). The examples use bash quoting; on Windows PowerShell put the config in a file and use `--config=@file.json`.
 
 | Task | Menu entry | Needs a config |
 |---|---|---|

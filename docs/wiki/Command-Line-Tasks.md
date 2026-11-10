@@ -8,7 +8,7 @@ ikabot --task=alertAttacks --config='{"minutes": 20}'
 
 The command answers with one line of JSON and returns right away. The task keeps running in the background, exactly like a task started from the menu.
 
-The options and the values each task accepts are listed in [CLI Task Reference](https://github.com/Ikabot-Collective/ikabot/wiki/CLI-Task-Reference).
+The options and the values each task accepts are listed in [CLI Task Reference](CLI-Task-Reference).
 
 ## Options
 
@@ -134,4 +134,4 @@ ikabot --batch=@tasks.json
 
 ## Pre-defined input
 
-Starting ikabot with [pre-defined input](https://github.com/Ikabot-Collective/ikabot/wiki/Getting-Started#pre-defined-input) (the answers to the menu as arguments) still works as before. The options above are only used when an argument starts with `--`.
+Starting ikabot with [pre-defined input](Getting-Started#pre-defined-input) (the answers to the menu as arguments) still works as before. The options above are only used when an argument starts with `--`.

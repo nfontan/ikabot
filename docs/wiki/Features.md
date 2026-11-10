@@ -10,7 +10,7 @@ Ikabot provides automation tools for account maintenance, city management, resou
 | Vacation mode | Enables vacation mode and closes Ikabot. |
 | Ikabot Web Server | Starts a local web interface so you can use Ikariam through Ikabot's active session. |
 | Import / export cookie | Lets you reuse Ikabot cookies in your browser or another Ikabot instance. |
-| Manage running tasks | Lists the running Ikabot tasks, stops them, and shows or saves their config to start them again from the [command line](https://github.com/Ikabot-Collective/ikabot/wiki/Command-Line-Tasks). |
+| Manage running tasks | Lists the running Ikabot tasks, stops them, and shows or saves their config to start them again from the [command line](Command-Line-Tasks). |
 | Logs | Shows Ikabot logs and can upload them for troubleshooting. |
 | Update Ikabot | Shows how to update Ikabot. |
 | Exit | Closes the main menu while configured background tasks continue running. |
