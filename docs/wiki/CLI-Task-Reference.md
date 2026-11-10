@@ -197,7 +197,7 @@ Conducts experiments in the academy: each one costs 300,000 crystal and gives re
 | `qty` | number | none | How many experiments to do, in the only city of `cities_ids`, one every 4 hours. The task stops earlier when the city runs out of crystal and sends a Telegram/Discord message. Leave it out to keep doing experiments in every city, waiting when a city has less than 300,000 crystal. |
 
 The cities must be yours and have an academy. With `qty`, the city must have the crystal for at least one experiment:
-`not enough crystal in Alpha for an experiment: 250,000 of 300,000`
+`not enough crystal in Alpha for an experiment: 250.000 of 300.000`
 
 ```bash
 # every 4 hours in every city with an academy, without end
@@ -206,7 +206,7 @@ ikabot --task=research
 ikabot --task=research --config='{"cities_ids": [1111], "qty": 3}'
 ```
 
-Status: `Done: Alpha | No crystal: Beta (120,000) @2026-11-10_14-32-05`, or `Experiment done in Alpha @..., left = 2 time (s)` with `qty`.
+Status: `Done: Alpha | No crystal: Beta (120.000) @2026-11-10_14-32-05`, or `Experiment done in Alpha @..., left = 2 time (s)` with `qty`.
 
 ## searchForIslandSpaces
 
