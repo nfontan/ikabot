@@ -13,6 +13,7 @@ Settings without a default are required. City ids can be listed with `ikabot --c
 | [`consolidateResources`](#consolidateresources) | Consolidate resources | yes |
 | [`donationBot`](#donationbot) | Donate > Donate automatically | yes |
 | [`loginDaily`](#logindaily) | Login daily | yes |
+| [`research`](#research) | Research > Conduct experiment / Conduct automatically | no |
 | [`searchForIslandSpaces`](#searchforislandspaces) | Dump / Monitor world > Monitor islands | yes |
 | [`tavernManager`](#tavernmanager) | Set Workers > Tavern > Equilibrium mode | yes |
 | [`webServer`](#webserver) | Ikabot Web Server | no |
@@ -185,6 +186,27 @@ ikabot --task=loginDaily --config='{"wine_city": 1111, "wood_city": 2222, "luxur
 ```
 
 Status: `Last activity @2026-11-10_09-55-12, next activity @2026-11-10_21-55-12`, or `Waiting 55s to watch video for wood bonus` while a video plays.
+
+## research
+
+Conducts experiments in the academy: each one costs 300,000 crystal and gives research points, and a city can do one every 4 hours. The menu's **Study** option is not a task.
+
+| Setting | Type | Default | Values |
+|---|---|---|---|
+| `cities_ids` | list of city ids | all your cities with an academy | The cities whose academy does the experiments. |
+| `qty` | number | none | How many experiments to do, in the only city of `cities_ids`, one every 4 hours. The task stops earlier when the city runs out of crystal and sends a Telegram/Discord message. Leave it out to keep doing experiments in every city, waiting when a city has less than 300,000 crystal. |
+
+The cities must be yours and have an academy. With `qty`, the city must have the crystal for at least one experiment:
+`not enough crystal in Alpha for an experiment: 250,000 of 300,000`
+
+```bash
+# every 4 hours in every city with an academy, without end
+ikabot --task=research
+# 3 experiments in city 1111
+ikabot --task=research --config='{"cities_ids": [1111], "qty": 3}'
+```
+
+Status: `Done: Alpha | No crystal: Beta (120,000) @2026-11-10_14-32-05`, or `Experiment done in Alpha @..., left = 2 time (s)` with `qty`.
 
 ## searchForIslandSpaces
 
