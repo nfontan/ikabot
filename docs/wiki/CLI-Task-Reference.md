@@ -11,6 +11,7 @@ Settings without a default are required. City ids can be listed with `ikabot --c
 | [`activateShrine`](#activateshrine) | Activate Shrine | yes |
 | [`autoPirate`](#autopirate) | Auto-Pirate | yes |
 | [`consolidateResources`](#consolidateresources) | Consolidate resources | yes |
+| [`dumpWorld`](#dumpworld) | Dump / Monitor world > Dump & Search world | no |
 | [`donationBot`](#donationbot) | Donate > Donate automatically | yes |
 | [`loginDaily`](#logindaily) | Login daily | yes |
 | [`research`](#research) | Research > Conduct experiment / Conduct automatically | no |
@@ -163,6 +164,31 @@ ikabot --task=donationBot --config='{"cities_dict": {"all": {"donation_type": "b
 ```
 
 Status: `Every 1440 min, last check 14:32 | Total donated: 25000`, and `Donated: 5000 | Total: 25000 @...` right after a donation.
+
+## dumpWorld
+
+Saves the world map to a file, to search it later from the menu (**Dump / Monitor world > Dump & Search world > Load existing dump**). The dump contains account-identifying information.
+
+| Setting | Type | Default | Values |
+|---|---|---|---|
+| `shallow` | yes/no | `false` | Only the map data: done in seconds, but the dump cannot be searched by player name. A full dump visits every island and takes hours. |
+| `waiting_time` | number | `1.5` | Seconds between two island requests, from `0` to `10` (the menu asks for milliseconds). |
+| `coords` | `[x, y]` or `"x:y"` | whole map | Only dump the islands around this point. Not with `shallow`. |
+| `radius` | number | `15` | Max distance from `coords`, from `0` to `200`. Only with `coords`. |
+| `non_empty_islands` | yes/no | `false` | Only dump islands with at least one town. Not with `shallow`. |
+
+The file is saved in `~/ikabot_world_dumps/s<world>-<lang>/` (`C:\Users\<user>\ikabot_world_dumps\...` on Windows), named after the date: `2026-11-10_11-16-07_shallow.json.gz`, or `..._partial.json.gz` for a part of the map.
+
+```bash
+# the map only, in seconds
+ikabot --task=dumpWorld --config='{"shallow": true}'
+# every island within 3 of 39:96, with its towns
+ikabot --task=dumpWorld --config='{"coords": "39:96", "radius": 3}'
+# the whole world, with towns and players (hours)
+ikabot --task=dumpWorld
+```
+
+Status while it runs: `Getting island id: 4415, x: 41, y: 99 43.8%, total: 46.6%`, updated every 30 seconds. At the end, the status shows `Dumped to <file> in 66s` and the same path is sent to Telegram/Discord. The task then ends.
 
 ## loginDaily
 
