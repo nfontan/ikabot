@@ -12,7 +12,7 @@ import ikabot.function.alertAttacks, ikabot.function.alertLowWine, ikabot.functi
 import ikabot.function.consolidateResources, ikabot.function.searchForIslandSpaces  # noqa
 import ikabot.function.donationBot, ikabot.function.tavernManager, ikabot.function.autoPirate  # noqa
 import ikabot.function.webServer, ikabot.function.loginDaily, ikabot.function.research, ikabot.function.dumpWorld  # noqa
-import ikabot.function.sendResources, ikabot.function.activateMiracle  # noqa
+import ikabot.function.sendResources, ikabot.function.activateMiracle, ikabot.function.UpgradeUnits  # noqa
 from ikabot.helpers.decorators import _TASK_REGISTRY
 from ikabot.helpers.ipc import _validate_task_config
 
@@ -53,6 +53,10 @@ MENU = {
     "activateMiracle": {"wonder": "5", "iterations": 3},
     # activateMiracle started from an older menu, which saved the whole island
     "activateMiracle (old menu)": {"island": HERMES, "iterations": 3},
+    "UpgradeUnits": {"jobs": [{"city_id": "111", "upgrades": [{"unitId": "303", "upgradeType": "offensive", "target": 8}]}]},
+    # UpgradeUnits started from an older menu, which saved every level to upgrade
+    "UpgradeUnits (old menu)": {"jobs": [{"city_id": "111", "city_name": "Alpha", "position": 5, "tab": "tabUnits", "tasks": [
+        {"unit": "Hoplite", "type": "Damage", "from": "5", "to": "6", "unitId": "303", "upgradeType": "offensive"}]}]},
     "loginDaily (old menu)": {"wine_city": {"id": 111, "name": "Alpha", "position": []}, "wood_city": None, "luxury_city": None,
                               "favour_tasks": ["Collect resource favour", "Look at hightscore/shop/inventory"], "collect_ambrosia": False},
 }
@@ -86,6 +90,10 @@ class TestRelaunchFromExportedConfig(unittest.TestCase):
         island = {"id": "4415", "x": 50, "y": 60, "cities": [{"type": "city", "id": 9000, "name": "Foreign"}]}
         stack.enter_context(patch("ikabot.function.sendResources.getIsland", return_value=island))
         stack.enter_context(patch("ikabot.function.activateMiracle.obtainMiraclesAvailable", return_value=[HERMES]))
+        workshop_city = {"id": "111", "name": "Alpha", "position": [{"building": "workshop", "position": 5, "level": 10}]}
+        stack.enter_context(patch("ikabot.function.UpgradeUnits.getCityById", return_value=workshop_city))
+        hoplite = {"completeData": {"303": {"offensive": {"currentLevel": {"upgradeLevel": 5}}}}, "unitDetails": {}}
+        stack.enter_context(patch("ikabot.function.UpgradeUnits.workshop_tab_data", return_value=hoplite))
 
     def test_every_task_relaunches_from_its_exported_config(self):
         session = MagicMock()
