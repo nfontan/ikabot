@@ -17,6 +17,7 @@ Settings without a default are required. City ids can be listed with `ikabot --c
 | [`donationBot`](#donationbot) | Donate > Donate automatically | yes |
 | [`loginDaily`](#logindaily) | Login daily | yes |
 | [`research`](#research) | Research > Conduct experiment / Conduct automatically | no |
+| [`resourceTransportManager`](#resourcetransportmanager) | Not in the main menu: Options / Settings > Load custom ikabot module, with its file | yes |
 | [`searchForIslandSpaces`](#searchforislandspaces) | Dump / Monitor world > Monitor islands | yes |
 | [`sendResources`](#sendresources) | Send resources | yes |
 | [`tavernManager`](#tavernmanager) | Set Workers > Tavern > Equilibrium mode | yes |
@@ -285,6 +286,55 @@ ikabot --task=research --config='{"cities_ids": [1111], "qty": 3}'
 ```
 
 Status: `Done: Alpha | No crystal: Beta (120.000) @2026-11-10_14-32-05`, or `Experiment done in Alpha @..., left = 2 time (s)` with `qty`.
+
+## resourceTransportManager
+
+Sends resources once or every few hours, in one of two modes:
+
+- `"consolidate"`: from several of your cities to one city, yours or another player's.
+- `"distribute"`: from one of your cities to several of your cities.
+
+It is not in the main menu. From the menu it runs as a custom module (Options / Settings > Load custom ikabot module, with the path of `ikabot/function/resourceTransportManager.py`). A task started that way is listed as `lcm_resourceTransportManager`; to relaunch its saved config from the command line, use `--task=resourceTransportManager`.
+
+| Setting | Type | Default | Values |
+|---|---|---|---|
+| `mode` | text | — | `"consolidate"` or `"distribute"`. |
+| `resource_config` | list of 5 amounts, or an object | — | Amounts of wood, wine, marble, crystal and sulfur (`[5000, 0, 0, 0, 0]`), or only the ones you use (`{"wood": 5000}`). What they mean depends on `send_mode`, see below. |
+| `interval_hours` | number | `0` | `0` sends once and the task ends. Otherwise, hours between rounds. |
+| `useFreighters` | yes/no | `false` | Send with freighters instead of trade ships. |
+| `notify` | text | `"none"` | Telegram/Discord messages: `"none"`, `"start"` (when each round starts) or `"all"` (also every shipment). Other than `"none"` needs Telegram or Discord set up. |
+
+With `"consolidate"`:
+
+| Setting | Type | Values |
+|---|---|---|
+| `origin_cities` | list of city ids | The cities that send. Must be your cities. The destination is removed from this list. |
+| `destination_city` | city id | The city that receives the resources. |
+| `island` | island id or `"X:Y"` | Only when `destination_city` is another player's city: its island. The task checks that the city is on it. |
+| `send_mode` | text | `"keep"`: each origin keeps the amount in `resource_config` and sends the rest; `0` sends all of it and `null` leaves that resource alone. `"send"`: each origin sends exactly that amount. |
+
+With `"distribute"`:
+
+| Setting | Type | Values |
+|---|---|---|
+| `origin_city` | city id | The city that sends. Must be one of your cities. |
+| `destination_cities` | list of city ids | The cities that receive. Must be your cities, other than `origin_city`. Each one gets the amounts in `resource_config`. |
+
+Fields that take several cities are lists, even with only one city: `"origin_cities": [1111]`, while `"destination_city": 3333` is a single id.
+
+The task does not start when the config sends nothing:
+`resource_config sends nothing`
+
+```bash
+# once: keep 100,000 wood in each origin and send the rest to Gamma
+ikabot --task=resourceTransportManager --config='{"mode": "consolidate", "origin_cities": [1111, 2222], "destination_city": 3333, "send_mode": "keep", "resource_config": {"wood": 100000}}'
+# every 6 hours: send exactly 5,000 wine to another player's city on the island at 50:60
+ikabot --task=resourceTransportManager --config='{"mode": "consolidate", "origin_cities": [1111], "destination_city": 9000, "island": "50:60", "send_mode": "send", "resource_config": {"wine": 5000}, "interval_hours": 6}'
+# once: 2,000 marble from Alpha to Beta and to Gamma
+ikabot --task=resourceTransportManager --config='{"mode": "distribute", "origin_city": 1111, "destination_cities": [2222, 3333], "resource_config": {"marble": 2000}}'
+```
+
+Status: ` Sending 0W, 0V, 2000M, 0C, 0S | Alpha ---> Beta ` while it sends, and at the end of a one-time run `One-time shipment completed: Alpha, Beta -> Gamma` (consolidate) or `One-time distribution completed: Alpha -> Beta, Gamma` (distribute). When the game does not take a shipment yet (for example while another transport is still loading), the task waits for the closest fleet to arrive and tries again; the status keeps showing `Sending ...` meanwhile.
 
 ## searchForIslandSpaces
 
