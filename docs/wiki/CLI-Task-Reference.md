@@ -19,6 +19,7 @@ Settings without a default are required. City ids can be listed with `ikabot --c
 | [`searchForIslandSpaces`](#searchforislandspaces) | Dump / Monitor world > Monitor islands | yes |
 | [`sendResources`](#sendresources) | Send resources | yes |
 | [`tavernManager`](#tavernmanager) | Set Workers > Tavern > Equilibrium mode | yes |
+| [`UpgradeUnits`](#upgradeunits) | Military actions > Upgrade Army | yes |
 | [`webServer`](#webserver) | Ikabot Web Server | no |
 
 The other tasks are being adapted. Until then they can be started with the config saved from **Manage running tasks**, but they do not check it before starting.
@@ -328,6 +329,29 @@ ikabot --task=tavernManager --config='{"run_hours": 0, "notification_mode": 1}'
 ```
 
 Status: `Every 2h, last check 14:32`.
+
+## UpgradeUnits
+
+Upgrades the attack or the armour of troops and ships in the workshop, up to the level you choose, one level at a time. Before each level the task reads the current one from the game, so a relaunched task goes on where it was. The workshop does one upgrade at a time; each city runs on its own.
+
+| Setting | Type | Default | Values |
+|---|---|---|---|
+| `jobs` | list | — | One entry per city: `{"city_id": ..., "upgrades": [...]}`. |
+| `jobs[].upgrades` | list | — | `{"unitId": ..., "upgradeType": "offensive" or "defensive", "target": level}`, done in this order. |
+
+The cities must be yours and have a workshop. `target` can be at most the workshop's level, and never more than 25. An unknown unit lists the ones the workshop can upgrade:
+`jobs[0].upgrades[0].unitId 999 cannot be upgraded in the workshop of Alpha. Units: 303 = Hoplite, 308 = Steam Giant, ..., 210 = Ram Ship`
+
+When the gold or crystal for the next level is missing, that city stops and sends a Telegram/Discord message.
+
+```bash
+# hoplites' attack to level 7 in city 1111
+ikabot --task=UpgradeUnits --config='{"jobs": [{"city_id": 1111, "upgrades": [{"unitId": 303, "upgradeType": "offensive", "target": 7}]}]}'
+# hoplites' attack and armour in one city, ram ships' attack in another
+ikabot --task=UpgradeUnits --config='{"jobs": [{"city_id": 1111, "upgrades": [{"unitId": 303, "upgradeType": "offensive", "target": 7}, {"unitId": 303, "upgradeType": "defensive", "target": 6}]}, {"city_id": 2222, "upgrades": [{"unitId": 210, "upgradeType": "offensive", "target": 4}]}]}'
+```
+
+Status: `Alpha: upgrading Hoplite (Damage) 5→6, target 7`, `Alpha: Upgrade in progress (~357m)...`, and at the end `Alpha: all workshop upgrades completed @2026-11-14_18-22-05`.
 
 ## webServer
 
