@@ -66,6 +66,12 @@ class TestRelaunchFromExportedConfig(unittest.TestCase):
         stack.enter_context(patch("ikabot.function.autoPirate.updateProcessList", return_value=[]))
         stack.enter_context(patch("ikabot.function.searchForIslandSpaces.islandIdFromCoords", return_value=50))
         stack.enter_context(patch("ikabot.function.webServer.is_port_in_use", return_value=False))
+        # the CI runs without flask, which only the web server needs to start
+        find_spec = ikabot.function.webServer.importlib.util.find_spec
+        stack.enter_context(patch.object(
+            ikabot.function.webServer.importlib.util, "find_spec",
+            side_effect=lambda name, *args: object() if name == "flask" else find_spec(name, *args),
+        ))
         academy_city = {"id": "111", "name": "Alpha", "position": [{"building": "academy", "position": 7}],
                         "availableResources": [0, 0, 0, 900000, 0]}
         stack.enter_context(patch("ikabot.function.research.getCityById", return_value=academy_city))
