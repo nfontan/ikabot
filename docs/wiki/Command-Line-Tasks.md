@@ -105,6 +105,8 @@ ikabot --world=s301-en --player="PlayerOne" --task=alertAttacks --config="@/home
 
 The same config can be used on another account of the lobby by changing `--player`.
 
+A task started from **Load custom Ikabot module** is listed with `lcm_` before its name (for example `lcm_resourceTransportManager`), and the saved command keeps that name. Use the task's own name to start it from the command line: `--task=resourceTransportManager`.
+
 ## Starting several tasks
 
 `--batch` takes a list of tasks, as JSON or as a file:

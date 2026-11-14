@@ -207,6 +207,8 @@ With `"producers"`, at least one of the cities must produce the resource and at 
 
 Resources already on their way are not counted: wait for the ships to arrive before distributing again.
 
+A config saved by an older version of the menu holds the shipments worked out back then, so it is not started again: save it again from a running task, or write `resource`, `mode` and `cities_ids`.
+
 ```bash
 # marble, the same amount in every city
 ikabot --task=distributeResources --config='{"resource": "marble"}'
@@ -417,8 +419,11 @@ Upgrades the attack or the armour of troops and ships in the workshop, up to the
 | `jobs` | list | — | One entry per city: `{"city_id": ..., "upgrades": [...]}`. |
 | `jobs[].upgrades` | list | — | `{"unitId": ..., "upgradeType": "offensive" or "defensive", "target": level}`, done in this order. |
 
-The cities must be yours and have a workshop. `target` can be at most the workshop's level, and never more than 25. An unknown unit lists the ones the workshop can upgrade:
+The cities must be yours, each one only once in `jobs`, and have a workshop. `target` can be at most the workshop's level, and never more than 25. An unknown unit lists the ones the workshop can upgrade:
 `jobs[0].upgrades[0].unitId 999 cannot be upgraded in the workshop of Alpha. Units: 303 = Hoplite, 308 = Steam Giant, ..., 210 = Ram Ship`
+
+When every upgrade has already reached its target, the task does not start:
+`every upgrade is already at its target level`
 
 When the gold or crystal for the next level is missing, that city stops and sends a Telegram/Discord message.
 
