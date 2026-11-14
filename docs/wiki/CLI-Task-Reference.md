@@ -8,6 +8,7 @@ Settings without a default are required. City ids can be listed with `ikabot --c
 |---|---|---|
 | [`alertAttacks`](#alertattacks) | Alerts / Notifications > Alert attacks | no |
 | [`alertLowWine`](#alertlowwine) | Alerts / Notifications > Alert wine running out | yes |
+| [`activateMiracle`](#activatemiracle) | Activate miracle | yes |
 | [`activateShrine`](#activateshrine) | Activate Shrine | yes |
 | [`autoPirate`](#autopirate) | Auto-Pirate | yes |
 | [`consolidateResources`](#consolidateresources) | Consolidate resources | yes |
@@ -59,6 +60,27 @@ ikabot --task=alertLowWine --config='{"hours": 6, "auto_transfer": true, "transf
 ```
 
 Status: `Every 60 min, last check 14:32`.
+
+## activateMiracle
+
+Activates the miracle of an island where one of your cities has a temple, again and again: each time it waits until the miracle can be activated. When you have temples on several islands with the same miracle, the task uses the one with the highest level, and checks the levels again before each activation.
+
+| Setting | Type | Default | Values |
+|---|---|---|---|
+| `wonder` | number or name | — | The miracle, by its god: `1` or `"hephaistos"`, `2` `"hades"`, `3` `"demeter"`, `4` `"athene"`, `5` `"hermes"`, `6` `"ares"`, `7` `"poseidon"`, `8` `"colossus"`. These numbers are the same in every world and language; they are not the numbers of the menu's list. |
+| `iterations` | number | `1` | How many times to activate it. For "always", use a large number such as `100`. |
+
+One of your cities with a temple must be on an island with that miracle:
+`none of your cities with a temple is on an island with the ares wonder. Your wonders: hermes = Temple of Hermes (level 3), athene = Temple of Athene (level 2)`
+
+```bash
+# Hermes, once
+ikabot --task=activateMiracle --config='{"wonder": "hermes"}'
+# Athene, every time it is available
+ikabot --task=activateMiracle --config='{"wonder": 4, "iterations": 100}'
+```
+
+Status: `Miracle Temple of Athene is activated. Available at: 2026-11-15_11-36-37` while it waits, `Activated Temple of Athene (level 2, Alpha) @..., iterations left: 99` after each activation.
 
 ## activateShrine
 
