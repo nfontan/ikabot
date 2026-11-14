@@ -13,7 +13,7 @@ import ikabot.function.consolidateResources, ikabot.function.searchForIslandSpac
 import ikabot.function.donationBot, ikabot.function.tavernManager, ikabot.function.autoPirate  # noqa
 import ikabot.function.webServer, ikabot.function.loginDaily, ikabot.function.research, ikabot.function.dumpWorld  # noqa
 import ikabot.function.sendResources, ikabot.function.activateMiracle, ikabot.function.UpgradeUnits  # noqa
-import ikabot.function.distributeResources  # noqa
+import ikabot.function.distributeResources, ikabot.function.resourceTransportManager  # noqa
 from ikabot.helpers.decorators import _TASK_REGISTRY
 from ikabot.helpers.ipc import _validate_task_config
 
@@ -60,6 +60,20 @@ MENU = {
         {"unit": "Hoplite", "type": "Damage", "from": "5", "to": "6", "unitId": "303", "upgradeType": "offensive"}]}]},
     "distributeResources": {"resource": "wine", "mode": "even", "cities_ids": ["111", "222"], "useFreighters": False},
     "distributeResources (all cities)": {"resource": "crystal", "mode": "even", "cities_ids": None, "useFreighters": True},
+    "resourceTransportManager": {"mode": "consolidate", "origin_cities": ["111"], "destination_city": "222", "interval_hours": 2,
+                                 "resource_config": [5000, 0, None, None, None], "useFreighters": False, "send_mode": "keep", "notify": "none"},
+    "resourceTransportManager (another player)": {"mode": "consolidate", "origin_cities": ["111", "222"], "destination_city": "9000",
+                                                  "island": "4415", "interval_hours": 0, "resource_config": [0, 100, 0, 0, 0],
+                                                  "useFreighters": True, "send_mode": "send", "notify": "none"},
+    "resourceTransportManager (distribute)": {"mode": "distribute", "origin_city": "111", "destination_cities": ["222"], "interval_hours": 0,
+                                              "resource_config": [1000, 0, 0, 0, 0], "useFreighters": False, "notify": "none"},
+    # resourceTransportManager started from an older menu, which saved whole cities and the island
+    "resourceTransportManager (old menu)": {"mode": "consolidate", "info": "Auto-send resources",
+                                            "origin_cities": [{"id": "111", "name": "Alpha", "position": []}],
+                                            "destination_city": {"id": "222", "name": "Beta", "isOwnCity": True},
+                                            "island": {"id": "77", "x": 1, "y": 2, "cities": []}, "interval_hours": 1,
+                                            "resource_config": [0, None, None, None, None], "useFreighters": False, "send_mode": 1,
+                                            "telegram_enabled": None, "notify_on_start": False},
     "loginDaily (old menu)": {"wine_city": {"id": 111, "name": "Alpha", "position": []}, "wood_city": None, "luxury_city": None,
                               "favour_tasks": ["Collect resource favour", "Look at hightscore/shop/inventory"], "collect_ambrosia": False},
 }
@@ -98,6 +112,7 @@ class TestRelaunchFromExportedConfig(unittest.TestCase):
         hoplite = {"completeData": {"303": {"offensive": {"currentLevel": {"upgradeLevel": 5}}}}, "unitDetails": {}}
         stack.enter_context(patch("ikabot.function.UpgradeUnits.workshop_tab_data", return_value=hoplite))
         stack.enter_context(patch("ikabot.function.distributeResources.getIdsOfCities", return_value=OWN))
+        stack.enter_context(patch("ikabot.function.resourceTransportManager.getIdsOfCities", return_value=OWN))
         stack.enter_context(patch("ikabot.function.distributeResources.plan_routes", return_value=[("a route",)]))
 
     def test_every_task_relaunches_from_its_exported_config(self):
