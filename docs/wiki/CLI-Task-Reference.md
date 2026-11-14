@@ -12,6 +12,7 @@ Settings without a default are required. City ids can be listed with `ikabot --c
 | [`activateShrine`](#activateshrine) | Activate Shrine | yes |
 | [`autoPirate`](#autopirate) | Auto-Pirate | yes |
 | [`consolidateResources`](#consolidateresources) | Consolidate resources | yes |
+| [`distributeResources`](#distributeresources) | Distribute resources | yes |
 | [`dumpWorld`](#dumpworld) | Dump / Monitor world > Dump & Search world | no |
 | [`donationBot`](#donationbot) | Donate > Donate automatically | yes |
 | [`loginDaily`](#logindaily) | Login daily | yes |
@@ -188,6 +189,33 @@ ikabot --task=donationBot --config='{"cities_dict": {"all": {"donation_type": "b
 ```
 
 Status: `Every 1440 min, last check 14:32 | Total donated: 25000`, and `Donated: 5000 | Total: 25000 @...` right after a donation.
+
+## distributeResources
+
+Spreads a resource among your cities. The task works out the shipments when it starts, with the amounts of that moment, sends them and ends.
+
+| Setting | Type | Default | Values |
+|---|---|---|---|
+| `resource` | text | — | `wood`, `wine`, `marble`, `crystal` or `sulfur`. |
+| `mode` | text | `"even"` | `"even"`: the same amount in every city (a city whose warehouse is too small gets what fits). `"producers"`: from the cities that produce the resource to the ones that do not, all they have; with wine, the producers keep one hour of their consumption. Not for wood, which every city produces. |
+| `cities_ids` | list of city ids | all your cities | The cities taking part. At least 2. |
+| `useFreighters` | yes/no | `false` | Send with freighters instead of trade ships. |
+
+With `"producers"`, at least one of the cities must produce the resource and at least one must not. When there is nothing to send, the task does not start:
+`there is nothing to distribute: the cities already have about the same marble, or their ports are blockaded`
+
+Resources already on their way are not counted: wait for the ships to arrive before distributing again.
+
+```bash
+# marble, the same amount in every city
+ikabot --task=distributeResources --config='{"resource": "marble"}'
+# wine from the cities that produce it to the others, with freighters
+ikabot --task=distributeResources --config='{"resource": "wine", "mode": "producers", "useFreighters": true}'
+# crystal between two cities
+ikabot --task=distributeResources --config='{"resource": "crystal", "cities_ids": [1111, 2222]}'
+```
+
+Status: `Sending 0W, 0V, 271M, 0C, 0S | Beta ---> Alpha` while it sends, `Distributed marble in 1 shipments @2026-11-14_13-05-41` at the end.
 
 ## dumpWorld
 
