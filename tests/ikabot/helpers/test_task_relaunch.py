@@ -12,12 +12,14 @@ import ikabot.function.alertAttacks, ikabot.function.alertLowWine, ikabot.functi
 import ikabot.function.consolidateResources, ikabot.function.searchForIslandSpaces  # noqa
 import ikabot.function.donationBot, ikabot.function.tavernManager, ikabot.function.autoPirate  # noqa
 import ikabot.function.webServer, ikabot.function.loginDaily, ikabot.function.research, ikabot.function.dumpWorld  # noqa
-import ikabot.function.sendResources  # noqa
+import ikabot.function.sendResources, ikabot.function.activateMiracle  # noqa
 from ikabot.helpers.decorators import _TASK_REGISTRY
 from ikabot.helpers.ipc import _validate_task_config
 
 OWN = (["111", "222"], {"111": {"name": "Alpha"}, "222": {"name": "Beta"}})
 FORTRESS = [{"id": "111", "name": "Alpha", "position": [{"building": "pirateFortress"}]}]
+HERMES = {"id": "4415", "wonder": "5", "wonderName": "Temple of Hermes", "wonderActivationLevel": 3, "available": True,
+          "ciudad": {"id": "111", "name": "Alpha", "islandId": "4415", "pos": "4"}, "cities": [{"type": "city", "id": 9000}]}
 
 MENU = {
     "alertAttacks": {"minutes": 20},
@@ -48,6 +50,9 @@ MENU = {
     "research (old menu, automatic)": {"mode": "experiment_multi", "cities": [{"cityID": "111", "cityName": "Alpha", "pos": 7}],
                                        "info": "Process: Experiments (automatic)"},
     # a loginDaily started from the menu before this change: full cities and the long names
+    "activateMiracle": {"wonder": "5", "iterations": 3},
+    # activateMiracle started from an older menu, which saved the whole island
+    "activateMiracle (old menu)": {"island": HERMES, "iterations": 3},
     "loginDaily (old menu)": {"wine_city": {"id": 111, "name": "Alpha", "position": []}, "wood_city": None, "luxury_city": None,
                               "favour_tasks": ["Collect resource favour", "Look at hightscore/shop/inventory"], "collect_ambrosia": False},
 }
@@ -80,6 +85,7 @@ class TestRelaunchFromExportedConfig(unittest.TestCase):
         stack.enter_context(patch("ikabot.function.sendResources.getCityById", return_value=stocked_city))
         island = {"id": "4415", "x": 50, "y": 60, "cities": [{"type": "city", "id": 9000, "name": "Foreign"}]}
         stack.enter_context(patch("ikabot.function.sendResources.getIsland", return_value=island))
+        stack.enter_context(patch("ikabot.function.activateMiracle.obtainMiraclesAvailable", return_value=[HERMES]))
 
     def test_every_task_relaunches_from_its_exported_config(self):
         session = MagicMock()
