@@ -52,7 +52,7 @@ Most tasks check their settings before they start (invalid values, cities that a
 ## Writing the config
 
 - The config is a JSON object: keys in double quotes, `true`/`false` for yes/no, lists in `[ ]`.
-- City and island ids can be written as numbers (`7665`) or as text (`"7665"`).
+- City and island ids can be written as numbers (`1111`) or as text (`"1111"`).
 - **Windows PowerShell** removes the double quotes inside arguments. Put the config in a file and use `--config=@file.json`. To create the file:
 
 ```powershell
