@@ -11,6 +11,7 @@ Settings without a default are required. City ids can be listed with `ikabot --c
 | [`activateMiracle`](#activatemiracle) | Activate miracle | yes |
 | [`activateShrine`](#activateshrine) | Activate Shrine | yes |
 | [`autoPirate`](#autopirate) | Auto-Pirate | yes |
+| [`buyResources`](#buyresources) | Marketplace > Buy resources | yes |
 | [`consolidateResources`](#consolidateresources) | Consolidate resources | yes |
 | [`distributeResources`](#distributeresources) | Distribute resources | yes |
 | [`dumpWorld`](#dumpworld) | Dump / Monitor world > Dump & Search world | no |
@@ -19,8 +20,10 @@ Settings without a default are required. City ids can be listed with `ikabot --c
 | [`research`](#research) | Research > Conduct experiment / Conduct automatically | no |
 | [`resourceTransportManager`](#resourcetransportmanager) | Not in the main menu: Options / Settings > Load custom ikabot module, with its file | yes |
 | [`searchForIslandSpaces`](#searchforislandspaces) | Dump / Monitor world > Monitor islands | yes |
+| [`sellResources`](#sellresources) | Marketplace > Sell resources | yes |
 | [`sendResources`](#sendresources) | Send resources | yes |
 | [`tavernManager`](#tavernmanager) | Set Workers > Tavern > Equilibrium mode | yes |
+| [`trainArmy`](#trainarmy) | Military actions > Train Army | yes |
 | [`UpgradeUnits`](#upgradeunits) | Military actions > Upgrade Army | yes |
 | [`webServer`](#webserver) | Ikabot Web Server | no |
 
@@ -140,6 +143,35 @@ ikabot --task=autoPirate --config='{"pirateCount": 100, "pirateSchedule": true, 
 ```
 
 Status: `Pirating for 50 more runs`, `Resolving captcha 1/20`, or `Outside of scheduled hours, waiting for the next range`.
+
+## buyResources
+
+Buys a resource from other players' offers in range of your trading post, the cheapest first. Before each purchase the task reads the offers again, so it buys at the prices of that moment. It ends when it bought everything, or when no offer matches any more.
+
+| Setting | Type | Default | Values |
+|---|---|---|---|
+| `city_id` | city id | — | One of your cities with a trading post. The resources travel to it. |
+| `resource` | text or number | — | `wood`, `wine`, `marble`, `crystal` or `sulfur` (or `0` to `4`). |
+| `amount` | number | — | How much to buy. At least `1`. |
+| `max_price` | number | `null` | Highest price per unit. `null` pays what the offers ask. |
+| `seller_player` | text | `null` | Buy only from this player, by name. |
+| `seller_city` | text | `null` | Buy only from this city, by name, as the trading post shows it. |
+
+Before it starts, the task checks that the amount fits in the city's warehouse, that the matching offers add up to it and that your gold pays for it:
+`the marble offers at or below 18 gold in range of Alpha add up to 400, asked to buy 3.000`
+
+It never pays more than `max_price`, also when a seller raised the price after the offers were read, and never buys more than your gold pays for. When the offers run out, the gold is not enough or the game rejects a purchase, it stops and sends a Telegram/Discord message.
+
+The menu saves as `max_price` the highest price of the offers it showed for that amount, so a relaunched task never pays more than what you accepted.
+
+```bash
+# 3,000 marble at 25 gold or less
+ikabot --task=buyResources --config='{"city_id": 1111, "resource": "marble", "amount": 3000, "max_price": 25}'
+# wine from one player only
+ikabot --task=buyResources --config='{"city_id": 1111, "resource": "wine", "amount": 1000, "max_price": 6, "seller_player": "PlayerTwo"}'
+```
+
+Status: `Buying 3.000 marble for Alpha: waiting for free ships` while no ship is free, `Bought 400 marble for 18 gold from Shop (PlayerTwo) ---> Alpha | ...` after each purchase, and at the end `Bought 3.000 of 3.000 marble for 61.000 gold @...`, with the reason when it bought less.
 
 ## consolidateResources
 
@@ -359,6 +391,37 @@ ikabot --task=searchForIslandSpaces --config='{"time": 3, "islandList": ["50:60"
 
 Status: `Checked islands [50:60,51:62] @ 14-32-05`.
 
+## sellResources
+
+Sells a resource from a city with a trading post, in one of two ways:
+
+- `"sell_to_offers"`: to other players' offers to buy in range, the best paid first. Before each sale the task reads the offers again. It ends when it sold everything, or when no offer matches any more.
+- `"create_offer"`: offered for sale in your trading post at your price. When the trading post has no room for all of it, the rest is added every 2 hours as it sells. The task tells you when it was sold.
+
+| Setting | Type | Default | Values |
+|---|---|---|---|
+| `mode` | text | — | `"sell_to_offers"` or `"create_offer"`. |
+| `city_id` | city id | — | One of your cities with a trading post. The resource leaves from it. |
+| `resource` | text or number | — | `wood`, `wine`, `marble`, `crystal` or `sulfur` (or `0` to `4`). |
+| `amount` | number | — | How much to sell. The city must have it. |
+| `min_price` | number | `null` | `sell_to_offers`: lowest price per unit to accept. `null` accepts any. |
+| `buyers` | list of city ids | `null` | `sell_to_offers`: only the offers of these cities. `null` sells to anyone in range. |
+| `price` | number | — | `create_offer`: price per unit, between the lowest and the highest the trading post accepts for that resource. |
+
+The trading post has one offer per resource, with one amount and one price. `create_offer` adds the amount to the offer of that resource you may already have, and the new price applies to all of it. Your offers of the other resources stay as they are. When that resource has an offer to buy, the task does not start:
+`Alpha has an offer to buy 2.000 wine: remove it first, the trading post has one offer per resource`
+
+From the menu, the offers you choose are saved as `buyers`, and the lowest price among them as `min_price`.
+
+```bash
+# 3,000 wood to the offers that pay 10 gold or more
+ikabot --task=sellResources --config='{"mode": "sell_to_offers", "city_id": 1111, "resource": "wood", "amount": 3000, "min_price": 10}'
+# offer 5,000 marble at 18 in the trading post
+ikabot --task=sellResources --config='{"mode": "create_offer", "city_id": 1111, "resource": "marble", "amount": 5000, "price": 18}'
+```
+
+Status (`sell_to_offers`): `Selling 3.000 wood from Alpha: waiting for free ships`, then `Sold 3.000 of 3.000 wood for 33.000 gold @...`, with the reason when it sold less. Status (`create_offer`): `Offered 5.000 marble at 18 in Alpha: waiting until it is sold`, and a Telegram/Discord message when it was sold.
+
 ## sendResources
 
 Sends resources from your cities to other cities, yours or another player's. When there are not enough ships, it waits for them and sends the rest in several trips. The task ends when everything has been sent.
@@ -409,6 +472,32 @@ ikabot --task=tavernManager --config='{"run_hours": 0, "notification_mode": 1}'
 ```
 
 Status: `Every 2h, last check 14:32`.
+
+## trainArmy
+
+Trains troops in the barracks, or ships in the shipyard, in rounds: each round starts when the previous one has finished. The same rounds can be trained in more cities and repeated. The task reads the units and their costs from the building each time.
+
+| Setting | Type | Default | Values |
+|---|---|---|---|
+| `city_id` | city id | — | One of your cities with barracks (troops) or a shipyard (ships). |
+| `type` | text | — | `"troops"` or `"ships"`. |
+| `rounds` | list | — | One object per round with the units and their amounts, e.g. `[{"phalanx": 20, "archer": 10}, {"spearman": 50}]`. A unit can be given by its identifier (`phalanx`), its id (`303`) or its name in the game. |
+| `repeat` | number | `0` | How many more times to train all the rounds. |
+| `replicate_to` | list of city ids | `null` | Other cities that train the same rounds, after `city_id`. They must be your cities and have the building. |
+
+An unknown unit lists the ones the building trains:
+`rounds[0] 'catapultx' is not trained there. Units: phalanx = Hoplite (303), steamgiant = Steam Giant (308), spearman = Spearman (315), ...`
+
+When the resources run out in a city, the task trains what they pay for, goes on with the other cities and sends a Telegram/Discord message at the end.
+
+```bash
+# 20 hoplites and 10 archers, then 50 spearmen
+ikabot --task=trainArmy --config='{"city_id": 1111, "type": "troops", "rounds": [{"phalanx": 20, "archer": 10}, {"spearman": 50}]}'
+# 5 ram ships in two cities, three times
+ikabot --task=trainArmy --config='{"city_id": 1111, "type": "ships", "rounds": [{"ship_ram": 5}], "repeat": 2, "replicate_to": [2222]}'
+```
+
+Status: `Training troops in Alpha (1/3)` while it trains, `Trained troops in 1111, 2222 @...` at the end.
 
 ## UpgradeUnits
 
