@@ -285,6 +285,11 @@ def get_captcha_string(image_bytes):
     except Exception:
         pass
 
+    return get_captcha_string_onnx(image_bytes)
+
+
+def get_captcha_string_onnx(image_bytes):
+    """Return the captcha text using only the onnxruntime model."""
     width, height, rgb_pixels = read_png(image_bytes)
 
     assert height <= 100 and width <= 500, "Image is too large"
