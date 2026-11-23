@@ -356,6 +356,7 @@ def do_it(session, save_file=True, send_telegram=False, send_pastebin=False, pas
 
     # Check if ranking data is valid
     skip_coordinates = stale_detected
+    zero_points = False
     if ranking_data and "ranking" in ranking_data and not stale_detected:
         ranking = ranking_data["ranking"]
         own_username = session.username if hasattr(session, 'username') else None
@@ -366,6 +367,7 @@ def do_it(session, save_file=True, send_telegram=False, send_pastebin=False, pas
                 if entry['name'] == own_username and entry['points'] == 0:
                     print("Account {} is in ranking with 0 points. Skipping coordinate collection.".format(own_username))
                     skip_coordinates = True
+                    zero_points = True
                     break
         
         # If no own account found but all players have 0 points, skip too
@@ -378,6 +380,7 @@ def do_it(session, save_file=True, send_telegram=False, send_pastebin=False, pas
         # If no ranking data or parsing failed, skip coordinates
         print("Ranking data could not be parsed or is invalid. Skipping coordinate collection.")
         skip_coordinates = True
+        zero_points = True
 
     # Get coordinates for each player (skip if ranking seems invalid)
     if ranking_data and "ranking" in ranking_data and not skip_coordinates:
@@ -470,6 +473,20 @@ def do_it(session, save_file=True, send_telegram=False, send_pastebin=False, pas
         # trust; the local file above still has it for debugging.
         print("Ranking update skipped (stale data).")
         return
+
+    # An account with 0 points has no row in the ranking, which shows up here
+    # as a parse failure (or as an explicit 0 entry), so alert about it.
+    if zero_points:
+        try:
+            sendToBot(
+                session,
+                "Pirate Ranking: this account has 0 points in the ranking "
+                "(no ranking entry found or it could not be parsed).\n"
+                "City: {} | Fortress Level: {}".format(city_with_max["name"], max_level),
+            )
+            print("0-points alert sent to Telegram")
+        except Exception as e:
+            print("Error sending 0-points alert to Telegram: {}".format(e))
 
     # Send to Telegram
     if send_telegram:
