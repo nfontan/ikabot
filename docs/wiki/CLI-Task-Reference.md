@@ -24,6 +24,7 @@ Settings without a default are required. City ids can be listed with `ikabot --c
 | [`sendResources`](#sendresources) | Send resources | yes |
 | [`tavernManager`](#tavernmanager) | Set Workers > Tavern > Equilibrium mode | yes |
 | [`trainArmy`](#trainarmy) | Military actions > Train Army | yes |
+| [`trainSpies`](#trainspies) | Military actions > Train Spies | yes |
 | [`UpgradeUnits`](#upgradeunits) | Military actions > Upgrade Army | yes |
 | [`webServer`](#webserver) | Ikabot Web Server | no |
 
@@ -328,7 +329,7 @@ Sends resources once or every few hours, in one of two modes:
 - `"consolidate"`: from several of your cities to one city, yours or another player's.
 - `"distribute"`: from one of your cities to several of your cities.
 
-It is not in the main menu. From the menu it runs as a custom module (Options / Settings > Load custom ikabot module, with the path of `ikabot/function/resourceTransportManager.py`). A task started that way is listed as `lcm_resourceTransportManager`; to relaunch its saved config from the command line, use `--task=resourceTransportManager`.
+It is not in the main menu. From the menu it runs as a custom module (Options / Settings > Load custom ikabot module, with the path of `ikabot/function/resourceTransportManager.py`). A task started that way is listed as `lcm_resourceTransportManager`; the command printed when its config is saved relaunches it as it is, and `--task=resourceTransportManager` works too.
 
 | Setting | Type | Default | Values |
 |---|---|---|---|
@@ -459,7 +460,7 @@ The tavern's equilibrium mode: while a city is growing, it serves the most wine;
 | Setting | Type | Default | Values |
 |---|---|---|---|
 | `run_hours` | number | — | Hours between checks, from `1` to `24`. `0` checks once and stops. |
-| `cities_ids` | list of city ids | all your cities | The cities to check. Must be your cities. |
+| `cities_ids` | list of city ids | all your cities | The cities to check. Must be your cities. Leave it out (or `null`) for all of them; an empty list is an error. |
 | `notification_mode` | number | `2` | Telegram/Discord messages: `1` every change and every error, `2` only errors, `3` none. |
 
 The first check runs right away. Between cities the task waits a few seconds, so as not to send all the requests at once.
@@ -498,6 +499,37 @@ ikabot --task=trainArmy --config='{"city_id": 1111, "type": "ships", "rounds": [
 ```
 
 Status: `Training troops in Alpha (1/3)` while it trains, `Trained troops in 1111, 2222 @...` at the end.
+
+## trainSpies
+
+Trains spies in the safehouses of your cities, so that each one has the spies you want. Each spy costs gold, from the account, and crystal, from the city that trains it. The task checks the cities right away and then every few hours, refilling the places that become free, for example spies lost on missions.
+
+| Setting | Type | Default | Values |
+|---|---|---|---|
+| `run_hours` | number | — | Hours between checks, from `1` to `24`. `0` checks once and stops. |
+| `cities_ids` | list of city ids | all your cities | The cities to check. Must be your cities. Cities without a safehouse are skipped. |
+| `settings` | object | see below | How many spies, and what must not be spent. |
+| `notification_mode` | number | `3` | Telegram/Discord messages: `1` every time spies are trained, `2` only errors, `3` none. |
+
+Inside `settings`, every value is a whole number, `0` or more:
+
+| Setting | Default | Values |
+|---|---|---|
+| `target` | `0` | Spies each city should have, counting those at home, on missions and in training. `0` fills the safehouse. With `10`, a city that has 4 trains 6 more. |
+| `goldFloor` | `0` | Gold the task never spends. With `200000` and 210,000 gold in the account, it spends only 10,000. `0` may spend all of it. |
+| `crystalFloor` | `0` | Crystal the task never spends in each city. `0` may spend all the crystal of the city. |
+| `maxPerPass` | `100` | Most spies ordered in one check, all cities together, to spread the spending over several checks. The cities with more empty places go first. `0` is no limit. |
+
+From the menu, the first check is done while you configure it and its results are shown; with `0` hours no task is left running. From the command line, the first check runs when the task starts.
+
+```bash
+# fill every safehouse now and every 6 hours, keeping 200,000 gold
+ikabot --task=trainSpies --config='{"run_hours": 6, "settings": {"goldFloor": 200000}}'
+# 10 spies in two cities, once, at most 20 per check
+ikabot --task=trainSpies --config='{"run_hours": 0, "cities_ids": [1111, 2222], "settings": {"target": 10, "maxPerPass": 20}}'
+```
+
+Status: `Spies checked @2026-11-27_19-10-42` after each check.
 
 ## UpgradeUnits
 

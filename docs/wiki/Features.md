@@ -54,6 +54,7 @@ Ikabot provides automation tools for account maintenance, city management, resou
 | Train army | Trains troops or fleets, including large queues and multi-step training plans. |
 | Send troops / ships | Moves troops or ships between cities or gathers them in one place. |
 | Upgrade army | Starts workshop upgrades for troops or ships when available. |
+| Train spies | Trains spies in the safehouses once or every few hours, up to a number per city, keeping the gold and crystal you choose. |
 | Attack barbarians | Runs a single barbarian attack flow. |
 | Auto grind barbarians | Automates repeated barbarian attacks and can collect the resulting resources. |
 | Activate miracle | Activates available miracles repeatedly when configured. |
